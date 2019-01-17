@@ -88,8 +88,9 @@ public class MergedMap<K, V> implements Map<K, V> {
                 break;
             }
         }
+        V ret = neededMap.put(key, value);
         _keySet.add(key);
-        return neededMap.put(key, value);
+        return ret;
     }
 
     @Override
@@ -102,10 +103,11 @@ public class MergedMap<K, V> implements Map<K, V> {
                 containCount++;
             }
         }
+        V ret = neededMap.remove(key);
         if (containCount <= 1) {
             _keySet.remove(key);
         }
-        return neededMap.remove(key);
+        return ret;
     }
 
     @Override
@@ -117,10 +119,10 @@ public class MergedMap<K, V> implements Map<K, V> {
 
     @Override
     public synchronized void clear() {
+        _keySet.clear();
         for (Map<K, V> map : _maps) {
             map.clear();
         }
-        _keySet.clear();
     }
 
     @Override
