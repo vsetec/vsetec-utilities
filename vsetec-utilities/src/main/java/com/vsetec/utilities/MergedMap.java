@@ -42,6 +42,12 @@ public class MergedMap<K, V> implements Map<K, V> {
         _lastMap = map;
     }
 
+    public synchronized void add(int index, Map<K, V> map) {
+        _maps.add(index, map);
+        _keySet.addAll(map.keySet());
+        _lastMap = _maps.get(_maps.size() - 1);
+    }
+
     public synchronized List<Map<K, V>> maps() {
         return _maps;
     }
