@@ -29,6 +29,8 @@ import java.util.Set;
 /**
  *
  * @author Fyodor Kravchenko <fedd@vsetec.com>
+ * @param <K> key class
+ * @param <V> value class
  */
 public class MergedMap<K, V> implements Map<K, V> {
 
@@ -46,6 +48,14 @@ public class MergedMap<K, V> implements Map<K, V> {
         _maps.add(index, map);
         _keySet.addAll(map.keySet());
         _lastMap = _maps.get(_maps.size() - 1);
+    }
+
+    public synchronized MergedMap shallowCopy() {
+        MergedMap ret = new MergedMap<K, V>();
+        for (Map<K, V> map : _maps) {
+            ret.add(map);
+        }
+        return ret;
     }
 
     public synchronized List<Map<K, V>> maps() {
@@ -73,7 +83,7 @@ public class MergedMap<K, V> implements Map<K, V> {
 
     @Override
     public boolean containsValue(Object value) {
-        for (Map map : _maps) {
+        for (Map<K, V> map : _maps) {
             if (map.containsValue(value)) {
                 return true;
             }
