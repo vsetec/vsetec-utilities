@@ -15,6 +15,7 @@
  */
 package com.vsetec.utilities;
 
+import java.io.Serializable;
 import java.util.AbstractCollection;
 import java.util.AbstractSet;
 import java.util.ArrayList;
@@ -32,7 +33,7 @@ import java.util.Set;
  * @param <K> key class
  * @param <V> value class
  */
-public class MergedMap<K, V> implements Map<K, V> {
+public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
     private final Set<K> _keySet = new HashSet<>();
     private final List<HiddenMap> _maps = new ArrayList<>();
@@ -231,7 +232,7 @@ public class MergedMap<K, V> implements Map<K, V> {
 
     }
 
-    private class HiddenMap implements Map<K, V> {
+    private class HiddenMap implements Map<K, V>, Serializable {
 
         private final Map<K, V> _hidden;
 
