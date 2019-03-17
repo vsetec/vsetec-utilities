@@ -30,6 +30,7 @@ public class ParallelStream extends InputStream {
 
     private final Provider _provider;
     private final int _myNumber;
+    private boolean _isClosed = false;
 
     public ParallelStream(InputStream parentStream) {
         if (parentStream instanceof ParallelStream) {
@@ -50,7 +51,14 @@ public class ParallelStream extends InputStream {
 
     @Override
     public void close() throws IOException {
-        _provider._detachAndClose(_myNumber);
+        if (!_isClosed) {
+            _provider._detachAndClose(_myNumber);
+            _isClosed = true;
+        }
+    }
+
+    public int getSequenceNumber() {
+        return _myNumber;
     }
 
     private class Provider implements Runnable {
@@ -151,7 +159,7 @@ public class ParallelStream extends InputStream {
     }
 
     /**
-     * A quick test. Creates two identical files 
+     * A quick test. Creates two identical files
      *
      * @param arguments
      * @throws UnsupportedEncodingException
