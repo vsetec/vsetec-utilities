@@ -35,10 +35,12 @@ public class ParallelStream extends InputStream {
     public ParallelStream(InputStream parentStream) {
         if (parentStream instanceof ParallelStream) {
             _provider = ((ParallelStream) parentStream)._provider;
-            _myNumber = _provider._attachAndGetYourNumber(this);
+            synchronized (_provider) {
+                _provider._attachAndGetYourNumber(this);
+            }
         } else {
             _provider = new Provider(parentStream);
-            _myNumber = _provider._attachAndGetYourNumber(this);
+            _provider._attachAndGetYourNumber(this);
             Thread thread = new Thread(_provider, "ParallelStream Provider for " + parentStream.toString());
             thread.start();
         }
@@ -46,13 +48,13 @@ public class ParallelStream extends InputStream {
 
     @Override
     public int read() throws IOException {
-        return _provider.read(_myNumber);
+        return _provider.read(this);
     }
 
     @Override
     public void close() throws IOException {
         if (!_isClosed) {
-            _provider._detachAndClose(_myNumber);
+            _provider._detachAndClose(this);
             _isClosed = true;
         }
     }
@@ -108,28 +110,35 @@ public class ParallelStream extends InputStream {
             notifyAll();
         }
 
-        private synchronized void _detachAndClose(int whosClosing) throws IOException {
+        private synchronized void _detachAndClose(ParallelStream whosClosing) throws IOException {
             int ret = _readers.length;
+            int nextGood = whosClosing._myNumber + 1;
 
             ParallelStream[] newReaderList = new ParallelStream[ret - 1];
-            System.arraycopy(_readers, 0, newReaderList, 0, whosClosing);
-            System.arraycopy(_readers, whosClosing + 1, newReaderList, whosClosing, newReaderList.length);
-            for (int i = 0; i < newReaderList.length; i++) {
-                newReaderList[i]._myNumber = i;
+            System.arraycopy(_readers, 0, newReaderList, 0, whosClosing._myNumber);
+            if (nextGood < _readers.length) {
+                System.arraycopy(_readers, nextGood, newReaderList, whosClosing._myNumber, newReaderList.length - whosClosing._myNumber);
             }
             _readers = newReaderList;
 
             boolean[] newReadList = new boolean[ret - 1];
-            System.arraycopy(_hasRead, 0, newReadList, 0, whosClosing);
-            System.arraycopy(_hasRead, whosClosing + 1, newReadList, whosClosing, newReadList.length);
+            System.arraycopy(_hasRead, 0, newReadList, 0, whosClosing._myNumber);
+            if (nextGood < _readers.length) {
+                System.arraycopy(_hasRead, nextGood, newReadList, whosClosing._myNumber, newReadList.length - whosClosing._myNumber);
+            }
             _hasRead = newReadList;
 
             if (newReadList.length == 0) {
                 _inputStream.close();
             }
+
+            for (int i = 0; i < newReaderList.length; i++) {
+                newReaderList[i]._myNumber = i;
+            }
+
         }
 
-        private synchronized int _attachAndGetYourNumber(ParallelStream ms) {
+        private synchronized void _attachAndGetYourNumber(ParallelStream ms) {
             int ret = _readers.length;
 
             ParallelStream[] newReaderList = new ParallelStream[ret + 1];
@@ -142,19 +151,20 @@ public class ParallelStream extends InputStream {
             newReadList[ret] = false;
             _hasRead = newReadList;
 
+            ms._myNumber = ret;
+
             notifyAll();
-            return ret;
         }
 
-        private synchronized int read(int theirNumber) throws IOException {
-            while (_hasRead[theirNumber]) {
+        private synchronized int read(ParallelStream theirNumber) throws IOException {
+            while (_hasRead[theirNumber._myNumber]) {
                 try {
                     wait(1000);
                 } catch (InterruptedException e) {
                     throw new RuntimeException("Unexpected interruption", e);
                 }
             }
-            _hasRead[theirNumber] = true;
+            _hasRead[theirNumber._myNumber] = true;
             notifyAll();
             return _currentChar;
         }
@@ -187,6 +197,7 @@ public class ParallelStream extends InputStream {
                         fos1.write(byt);
                     }
                     fos1.close();
+                    ms1.close();
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
@@ -200,6 +211,7 @@ public class ParallelStream extends InputStream {
                 fos2.write(byt);
             }
             fos2.close();
+            ms2.close();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
