@@ -15,7 +15,8 @@
  */
 package com.vsetec.utilities;
 
-import java.io.ByteArrayInputStream;
+import java.io.BufferedInputStream;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -30,7 +31,9 @@ public class ParallelStream extends InputStream {
 
     private final Provider _provider;
     private int _myNumber;
+    private boolean _askedForNext = false;
     private boolean _isClosed = false;
+    private int _nextChar = -2;
 
     public ParallelStream(InputStream parentStream) {
         if (parentStream instanceof ParallelStream) {
@@ -41,14 +44,26 @@ public class ParallelStream extends InputStream {
         } else {
             _provider = new Provider(parentStream);
             _provider._attachAndGetYourNumber(this);
-            Thread thread = new Thread(_provider, "ParallelStream Provider for " + parentStream.toString());
-            thread.start();
         }
     }
 
     @Override
     public int read() throws IOException {
-        return _provider.read(this);
+        synchronized (_provider) {
+            _askedForNext = true;
+            if (!_provider._alreadyCalled) {
+                _provider._loadNext();
+            }
+            _provider.notifyAll();
+            while (_askedForNext) {
+                try {
+                    _provider.wait(1000);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException("Unexpected interruption", e);
+                }
+            }
+            return _nextChar;
+        }
     }
 
     @Override
@@ -63,51 +78,35 @@ public class ParallelStream extends InputStream {
         return _myNumber;
     }
 
-    private class Provider implements Runnable {
+    private class Provider {
 
         private final InputStream _inputStream;
         private ParallelStream[] _readers = new ParallelStream[0];
-        private boolean[] _hasRead = new boolean[0];
-        private int _currentChar = -2;
+        private boolean _alreadyCalled = false;
 
         private Provider(InputStream inputStream) {
             _inputStream = inputStream;
         }
 
-        @Override
-        public void run() {
-            try {
-                while ((_currentChar = _inputStream.read()) != -1) {
-                    _waitForAllToRead(true);
-                }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        }
+        private void _loadNext() throws IOException {
+            _alreadyCalled = true;
 
-        private synchronized void _waitForAllToRead(boolean markUnread) {
-            loop:
-            while (true) {
-                for (boolean hasRead : _hasRead) {
-                    if (!hasRead) {
-                        try {
-                            wait(1000);
-                        } catch (InterruptedException e) {
-                            throw new RuntimeException("Inexpected interruption", e);
-                        }
-                        continue loop;
+            int nextChar = _inputStream.read();
+
+            for (ParallelStream sibling : _readers) {
+                while (!sibling._askedForNext) {
+                    try {
+                        wait(1000);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException("Unexpected interruption", e);
                     }
                 }
-
-                if (markUnread) {
-                    for (int i = 0; i < _hasRead.length; i++) {
-                        _hasRead[i] = false;
-                    }
-                }
-
-                break;
+                sibling._askedForNext = false;
+                sibling._nextChar = nextChar;
             }
-            notifyAll();
+            // all asked
+
+            _alreadyCalled = false;
         }
 
         private synchronized void _detachAndClose(ParallelStream whosClosing) throws IOException {
@@ -121,21 +120,14 @@ public class ParallelStream extends InputStream {
             }
             _readers = newReaderList;
 
-            boolean[] newReadList = new boolean[ret - 1];
-            System.arraycopy(_hasRead, 0, newReadList, 0, whosClosing._myNumber);
-            if (nextGood < _readers.length) {
-                System.arraycopy(_hasRead, nextGood, newReadList, whosClosing._myNumber, newReadList.length - whosClosing._myNumber);
-            }
-            _hasRead = newReadList;
-
-            if (newReadList.length == 0) {
+            if (newReaderList.length == 0) {
                 _inputStream.close();
+            } else {
+                for (int i = 0; i < newReaderList.length; i++) {
+                    newReaderList[i]._myNumber = i;
+                }
             }
-
-            for (int i = 0; i < newReaderList.length; i++) {
-                newReaderList[i]._myNumber = i;
-            }
-
+            notifyAll();
         }
 
         private synchronized void _attachAndGetYourNumber(ParallelStream ms) {
@@ -146,27 +138,7 @@ public class ParallelStream extends InputStream {
             newReaderList[ret] = ms;
             _readers = newReaderList;
 
-            boolean[] newReadList = new boolean[ret + 1];
-            System.arraycopy(_hasRead, 0, newReadList, 0, ret);
-            newReadList[ret] = false;
-            _hasRead = newReadList;
-
             ms._myNumber = ret;
-
-            notifyAll();
-        }
-
-        private synchronized int read(ParallelStream theirNumber) throws IOException {
-            while (_hasRead[theirNumber._myNumber]) {
-                try {
-                    wait(1000);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException("Unexpected interruption", e);
-                }
-            }
-            _hasRead[theirNumber._myNumber] = true;
-            notifyAll();
-            return _currentChar;
         }
 
     }
@@ -180,13 +152,16 @@ public class ParallelStream extends InputStream {
      */
     public static void main(String[] arguments) throws UnsupportedEncodingException, FileNotFoundException {
         String test = "A quick brown fox jumped over a lazy dog\n";
-        InputStream is = new ByteArrayInputStream(test.getBytes("UTF-8"));
+        InputStream is = new BufferedInputStream(new FileInputStream("/home/fedd/Videos/stgal.mp4"));
+        //InputStream is = new ByteArrayInputStream(test.getBytes("UTF-8"));
 
-        FileOutputStream fos1 = new FileOutputStream("testfile1", true);
-        FileOutputStream fos2 = new FileOutputStream("testfile2", true);
+        FileOutputStream fos1 = new FileOutputStream("testfile1.mp4", true);
+        FileOutputStream fos2 = new FileOutputStream("testfile2.mp4", true);
+        FileOutputStream fos3 = new FileOutputStream("testfile3.mp4", true);
 
         ParallelStream ms1 = new ParallelStream(is);
         ParallelStream ms2 = new ParallelStream(ms1);
+        ParallelStream ms3 = new ParallelStream(ms2);
 
         Thread thread = new Thread(new Runnable() {
             @Override
@@ -203,6 +178,23 @@ public class ParallelStream extends InputStream {
                 }
             }
         }, "ParallelStream test");
+        thread.start();
+
+        thread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    int byt;
+                    while ((byt = ms3.read()) != -1) {
+                        fos3.write(byt);
+                    }
+                    fos3.close();
+                    ms3.close();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }, "ParallelStream test 3");
         thread.start();
 
         try {
