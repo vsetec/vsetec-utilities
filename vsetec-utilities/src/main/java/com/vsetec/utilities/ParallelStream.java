@@ -169,7 +169,7 @@ public class ParallelStream extends InputStream {
                 try {
                     int byt;
                     while ((byt = ms1.read()) != -1) {
-                        fos1.write(byt);
+                        //fos1.write(byt);
                     }
                     fos1.close();
                     ms1.close();
@@ -199,8 +199,16 @@ public class ParallelStream extends InputStream {
 
         try {
             int byt;
+            int i = 0;
+            long time = System.currentTimeMillis();
             while ((byt = ms2.read()) != -1) {
-                fos2.write(byt);
+                //fos2.write(byt);
+                i++;
+                if (i > 100000) {
+                    i = 0;
+                    long took = System.currentTimeMillis() - time;
+                    System.out.println("100000 bytes took " + took + " milliseconds which means " + (100000000 / took) + " bytes per second");
+                }
             }
             fos2.close();
             ms2.close();
