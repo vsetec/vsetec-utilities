@@ -29,7 +29,7 @@ import java.io.UnsupportedEncodingException;
 public class ParallelStream extends InputStream {
 
     private final Provider _provider;
-    private final int _myNumber;
+    private int _myNumber;
     private boolean _isClosed = false;
 
     public ParallelStream(InputStream parentStream) {
@@ -114,6 +114,9 @@ public class ParallelStream extends InputStream {
             ParallelStream[] newReaderList = new ParallelStream[ret - 1];
             System.arraycopy(_readers, 0, newReaderList, 0, whosClosing);
             System.arraycopy(_readers, whosClosing + 1, newReaderList, whosClosing, newReaderList.length);
+            for (int i = 0; i < newReaderList.length; i++) {
+                newReaderList[i]._myNumber = i;
+            }
             _readers = newReaderList;
 
             boolean[] newReadList = new boolean[ret - 1];
