@@ -37,7 +37,9 @@ public class ParallelStream extends InputStream {
     private int _myNumber;
     private boolean _askedForNext = false;
     private boolean _isClosed = false;
-    private int _nextChar = -2;
+    private final byte[] _buffer = new byte[50];
+    private int _bufferEnd = -1;
+    private int _curPos = 0;
 
     public ParallelStream(InputStream parentStream) {
         if (parentStream instanceof ParallelStream) {
@@ -52,21 +54,35 @@ public class ParallelStream extends InputStream {
     }
 
     @Override
-    public synchronized int read() throws IOException {
-        _askedForNext = true;
-        if (_myNumber == 0) {
-            _provider._loadNext();
-        } else {
-            notify();
+    public int read() throws IOException {
+        if(_curPos<_bufferEnd){
+            int ret = Byte.toUnsignedInt(_buffer[_curPos]);
+            _curPos++;
+            return ret;
         }
-        while (_askedForNext) {
-            try {
-                wait(1000);
-            } catch (InterruptedException e) {
-                throw new RuntimeException("Unexpected interruption", e);
+        
+        synchronized(this){
+            _askedForNext = true;
+            if (_myNumber == 0) {
+                _provider._loadNext();
+            } else {
+                notify();
+            }
+            while (_askedForNext) {
+                try {
+                    wait(1000);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException("Unexpected interruption", e);
+                }
+            }
+            if(_bufferEnd<0){
+                return -1;
+            }else{
+                int ret = Byte.toUnsignedInt(_buffer[0]);
+                _curPos = 1;
+                return ret;
             }
         }
-        return _nextChar;
     }
 
     @Override
@@ -85,13 +101,16 @@ public class ParallelStream extends InputStream {
 
         private final InputStream _inputStream;
         private ParallelStream[] _readers = new ParallelStream[0];
+        private final byte[] _bufferP = new byte[50];
+        private int _bufferEndP = -1;
+        
 
         private Provider(InputStream inputStream) {
             _inputStream = inputStream;
         }
 
         private synchronized void _loadNext() throws IOException {
-            int nextChar = _inputStream.read();
+            _bufferEndP = _inputStream.read(_bufferP);
 
             for (ParallelStream sibling : _readers) {
                 synchronized (sibling) {
@@ -103,7 +122,10 @@ public class ParallelStream extends InputStream {
                         }
                     }
                     sibling._askedForNext = false;
-                    sibling._nextChar = nextChar;
+                    sibling._bufferEnd = _bufferEndP;
+                    if(_bufferEndP>=0){
+                        System.arraycopy(_bufferP, 0, sibling._buffer, 0, _bufferEndP);
+                    }
                     sibling.notify();
                 }
             }
@@ -154,9 +176,9 @@ public class ParallelStream extends InputStream {
      *
      * plain copy - 20.000.000 bytes per second
      *
-     * 2, 3 files - 100.000 bytes per second
+     * 2,3 files - 2 - 5.000.000 bytes per second
      *
-     * 1 file - 5.000.000 bytes per second
+     * 1 file - 25.000.000 bytes per second
      *
      * @param arguments
      * @throws UnsupportedEncodingException
