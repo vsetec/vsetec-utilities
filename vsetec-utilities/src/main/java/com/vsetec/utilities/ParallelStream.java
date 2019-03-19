@@ -32,6 +32,7 @@ import java.io.UnsupportedEncodingException;
  */
 public class ParallelStream extends InputStream {
 
+    //TODO: probably rewrite with a dedicated provider thread
     private final Provider _provider;
     private int _myNumber;
     private boolean _askedForNext = false;
@@ -112,24 +113,26 @@ public class ParallelStream extends InputStream {
         private synchronized void _detachAndClose(ParallelStream whosClosing) throws IOException {
             // TODO: check if it's safe to detach one of the readers while others are working. What if another reader becomes first thus acquiring a special position
             synchronized (whosClosing) {
-                int ret = _readers.length;
-                int nextGood = whosClosing._myNumber + 1;
+                synchronized (_readers[0]) {
+                    int ret = _readers.length;
+                    int nextGood = whosClosing._myNumber + 1;
 
-                ParallelStream[] newReaderList = new ParallelStream[ret - 1];
-                System.arraycopy(_readers, 0, newReaderList, 0, whosClosing._myNumber);
-                if (nextGood < _readers.length) {
-                    System.arraycopy(_readers, nextGood, newReaderList, whosClosing._myNumber, newReaderList.length - whosClosing._myNumber);
-                }
-                _readers = newReaderList;
-
-                if (newReaderList.length == 0) {
-                    _inputStream.close();
-                } else {
-                    for (int i = 0; i < newReaderList.length; i++) {
-                        newReaderList[i]._myNumber = i;
+                    ParallelStream[] newReaderList = new ParallelStream[ret - 1];
+                    System.arraycopy(_readers, 0, newReaderList, 0, whosClosing._myNumber);
+                    if (nextGood < _readers.length) {
+                        System.arraycopy(_readers, nextGood, newReaderList, whosClosing._myNumber, newReaderList.length - whosClosing._myNumber);
                     }
+                    _readers = newReaderList;
+
+                    if (newReaderList.length == 0) {
+                        _inputStream.close();
+                    } else {
+                        for (int i = 0; i < newReaderList.length; i++) {
+                            newReaderList[i]._myNumber = i;
+                        }
+                    }
+                    notifyAll();
                 }
-                notifyAll();
             }
         }
 
@@ -147,7 +150,13 @@ public class ParallelStream extends InputStream {
     }
 
     /**
-     * A quick test. Creates two identical files
+     * A quick test. Creates several identical files.
+     *
+     * plain copy - 20.000.000 bytes per second
+     *
+     * 2, 3 files - 100.000 bytes per second
+     *
+     * 1 file - 5.000.000 bytes per second
      *
      * @param arguments
      * @throws UnsupportedEncodingException
