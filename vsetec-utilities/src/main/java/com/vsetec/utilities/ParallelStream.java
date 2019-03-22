@@ -55,13 +55,13 @@ public class ParallelStream extends InputStream {
 
     @Override
     public int read() throws IOException {
-        if(_curPos<_bufferEnd){
+        if (_curPos < _bufferEnd) {
             int ret = Byte.toUnsignedInt(_buffer[_curPos]);
             _curPos++;
             return ret;
         }
-        
-        synchronized(this){
+
+        synchronized (this) {
             _askedForNext = true;
             if (_myNumber == 0) {
                 _provider._loadNext();
@@ -75,9 +75,9 @@ public class ParallelStream extends InputStream {
                     throw new RuntimeException("Unexpected interruption", e);
                 }
             }
-            if(_bufferEnd<0){
+            if (_bufferEnd < 0) {
                 return -1;
-            }else{
+            } else {
                 int ret = Byte.toUnsignedInt(_buffer[0]);
                 _curPos = 1;
                 return ret;
@@ -103,7 +103,6 @@ public class ParallelStream extends InputStream {
         private ParallelStream[] _readers = new ParallelStream[0];
         private final byte[] _bufferP = new byte[50];
         private int _bufferEndP = -1;
-        
 
         private Provider(InputStream inputStream) {
             _inputStream = inputStream;
@@ -123,7 +122,7 @@ public class ParallelStream extends InputStream {
                     }
                     sibling._askedForNext = false;
                     sibling._bufferEnd = _bufferEndP;
-                    if(_bufferEndP>=0){
+                    if (_bufferEndP >= 0) {
                         System.arraycopy(_bufferP, 0, sibling._buffer, 0, _bufferEndP);
                     }
                     sibling.notify();
