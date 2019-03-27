@@ -66,10 +66,12 @@ public class PropertiesUtils {
     public static Properties mapOfMapsToProperties(Map<String, Object> map) {
         Properties props = new Properties();
 
-        for (String key : map.keySet()) {
+        if (map != null) {
+            for (String key : map.keySet()) {
 
-            _map2propRecur(props, key, (Map<String, Object>) map.get(key));
+                _map2propRecur(props, key, (Map<String, Object>) map.get(key));
 
+            }
         }
 
         return props;
