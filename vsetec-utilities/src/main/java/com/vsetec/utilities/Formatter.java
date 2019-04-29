@@ -51,6 +51,10 @@ public class Formatter {
     private final TreeMap<Integer, Map<String, List<TimeZone>>> _offsetCountryTimezone = new TreeMap<>();
     private final Map<Locale, ResourceBundle[]> _resBnd;
 
+    protected Formatter(Formatter formatter) {
+        _resBnd = formatter._resBnd;
+    }
+
     public Formatter(Map<Locale, ResourceBundle[]> resourceBundles) {
         try {
             _resBnd = resourceBundles;
