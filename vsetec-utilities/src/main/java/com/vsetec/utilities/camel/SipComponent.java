@@ -15,37 +15,23 @@
  */
 package com.vsetec.utilities.camel;
 
+import com.vsetec.sip.Received;
+import com.vsetec.sip.Request;
+import com.vsetec.sip.RequestReceived;
+import com.vsetec.sip.Response;
+import com.vsetec.sip.ResponseReceived;
+import com.vsetec.sip.Sendable;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.Reader;
-import java.net.URI;
-import java.text.ParseException;
-import java.util.EventObject;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.Properties;
-import javax.sip.ClientTransaction;
-import javax.sip.Dialog;
-import javax.sip.DialogTerminatedEvent;
-import javax.sip.IOExceptionEvent;
-import javax.sip.ListeningPoint;
-import javax.sip.PeerUnavailableException;
-import javax.sip.RequestEvent;
-import javax.sip.ResponseEvent;
-import javax.sip.SipFactory;
-import javax.sip.SipListener;
-import javax.sip.SipProvider;
-import javax.sip.SipStack;
-import javax.sip.TimeoutEvent;
-import javax.sip.Transaction;
-import javax.sip.TransactionTerminatedEvent;
-import javax.sip.address.AddressFactory;
-import javax.sip.header.HeaderFactory;
-import javax.sip.message.MessageFactory;
-import javax.sip.message.Request;
 import org.apache.camel.CamelContext;
 import org.apache.camel.Consumer;
 import org.apache.camel.Endpoint;
 import org.apache.camel.Exchange;
-import org.apache.camel.ExchangePattern;
 import org.apache.camel.Message;
 import org.apache.camel.NoTypeConversionAvailableException;
 import org.apache.camel.Processor;
@@ -54,9 +40,8 @@ import org.apache.camel.TypeConversionException;
 import org.apache.camel.TypeConverter;
 import org.apache.camel.impl.DefaultComponent;
 import org.apache.camel.impl.DefaultEndpoint;
-import org.apache.camel.impl.DefaultExchange;
-import org.apache.camel.impl.DefaultMessage;
 import org.apache.camel.impl.DefaultProducer;
+import org.apache.camel.spi.TypeConverterRegistry;
 import org.apache.commons.io.IOUtils;
 
 /**
@@ -65,100 +50,57 @@ import org.apache.commons.io.IOUtils;
  */
 public class SipComponent extends DefaultComponent {
 
-    private final SipFactory _sipFactory = SipFactory.getInstance();
-    private final HeaderFactory _headerFactory;
-    private final AddressFactory _addressFactory;
-    private final MessageFactory _messageFactory;
-    private final RequestParser _requestParser;
-    private final Object _security;
-    private final String _host;
+    private final SipRequestParser _requstParser;
 
-    public SipComponent(String implementationPackage, String host, Object security, CamelContext camelContext) { // TODO: implement sips - change "security to the appropriate type
+    public SipComponent(CamelContext camelContext) {
 
         super(camelContext);
-        
-        _host = host;
-        _security = security;
-        _sipFactory.setPathName(implementationPackage);
 
-        try {
-            _headerFactory = _sipFactory.createHeaderFactory();
-            _addressFactory = _sipFactory.createAddressFactory();
-            _messageFactory = _sipFactory.createMessageFactory();
+        _requstParser = new SipRequestParser();
 
-        } catch (PeerUnavailableException e) {
-            throw new RuntimeException(e);
-        }
-
-        _requestParser = new RequestParser();
-
-        camelContext.getTypeConverterRegistry().addTypeConverter(Request.class, CharSequence.class, _requestParser);
-        camelContext.getTypeConverterRegistry().addTypeConverter(Request.class, Reader.class, _requestParser);
     }
 
-    public RequestParser getRequestParser() {
-        return _requestParser;
-    }
+    @Override
+    protected void doStart() throws Exception {
+        TypeConverterRegistry tcr = getCamelContext().getTypeConverterRegistry();
 
-    public HeaderFactory getHeaderFactory() {
-        return _headerFactory;
-    }
+        tcr.addTypeConverter(Received.class, String.class, _requstParser);
+        tcr.addTypeConverter(Received.class, Reader.class, _requstParser);
+        tcr.addTypeConverter(Received.class, InputStream.class, _requstParser);
 
-    public AddressFactory getAddressFactory() {
-        return _addressFactory;
-    }
+        tcr.addTypeConverter(String.class, Sendable.class, _requstParser);
+        tcr.addTypeConverter(Reader.class, Sendable.class, _requstParser);
+        tcr.addTypeConverter(InputStream.class, Sendable.class, _requstParser);
 
-    public MessageFactory getMessageFactory() {
-        return _messageFactory;
+        super.doStart(); //To change body of generated methods, choose Tools | Templates.
     }
 
     @Override
     protected Endpoint createEndpoint(String uri, String remaining, Map<String, Object> parameters) throws Exception {
-        // sip:ws:1.2.3.4:2929?javax.sip.STACK_NAME=wsphone  -- can't get "path" from websocket uri
-        // sip:udp:5.6.7.8:5060?javax.sip.STACK_NAME=udpserver
-        // sips:...................
 
-        final SipStack sipStack;
-        final String transport;
-        final String ip;
-        final int port;
+        final Endpoint wrappedEndpoint;
         {
-            Properties properties = new Properties();
-            properties.setProperty("javax.sip.STACK_NAME", uri);
-            properties.putAll(parameters);
-            properties.remove("javax.sip.IP_ADDRESS");
-            sipStack = _sipFactory.createSipStack(properties);
-
-            URI sipUri = new URI(remaining);
-            transport = sipUri.getScheme();
-            ip = sipUri.getHost();
-            port = sipUri.getPort();
+            int myComponentPrefixEnd = uri.indexOf(remaining);
+            String wrappedUri = uri.substring(myComponentPrefixEnd);
+            wrappedEndpoint = getCamelContext().getEndpoint(wrappedUri);
         }
 
         Endpoint camelEndpoint = new DefaultEndpoint(uri, this) {
 
-
             @Override
             public Producer createProducer() throws Exception {
 
-                final Endpoint endpoint = this;
+                Producer wrappedProducer = wrappedEndpoint.createProducer();
 
                 return new DefaultProducer(this) {
                     @Override
                     public void process(Exchange exchange) throws Exception {
+
+                        // transform body
                         Message in = exchange.getIn();
-                        Request request = in.getBody(Request.class);
-                        
-                        //sipStack.
-                        
-                        //request.setRequestURI(requestURI);
-                        
-                        ClientTransaction transaction = _sipProvider.getNewClientTransaction(request);
-                        transaction.sendRequest();
-                        exchange.setPattern(ExchangePattern.InOut);
-                        Message out = new DefaultMessage(endpoint.getCamelContext());
-                        out.setBody(transaction.getDialog());
-                        exchange.setOut(out);
+                        in.setBody(in.getBody(Sendable.class));
+                        wrappedProducer.process(exchange);
+
                     }
                 };
             }
@@ -166,45 +108,21 @@ public class SipComponent extends DefaultComponent {
             @Override
             public Consumer createConsumer(Processor processor) throws Exception {
 
-                final Endpoint endpoint = this;
-                final ListeningPoint _listeningPoint = sipStack.createListeningPoint(ip, port, transport);
-                final SipProvider _sipProvider = sipStack.createSipProvider(_listeningPoint);
-
-                final SipListener consumerListener = new DefaultSipListener() {
+                Processor wrappingProcessor = new Processor() {
                     @Override
-                    public void processRequest(RequestEvent requestEvent) {
-                        Exchange exchange = new DefaultExchange(endpoint);
+                    public void process(Exchange exchange) throws Exception {
                         
-                        SipMessage in = new SipMessage(endpoint.getCamelContext(), requestEvent);
-                        exchange.setIn(in);
-
-                        try {
-                            processor.process(exchange);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
+                        Message in = exchange.getIn();
+                        in.setBody(in.getBody(Sendable.class));
+                        processor.process(exchange);
+                        
                     }
                 };
 
-                Consumer consumer = new Consumer() {
+                Consumer wrappedConsumer = wrappedEndpoint.createConsumer(wrappingProcessor);
 
-                    @Override
-                    public void start() throws Exception {
-                        _sipProvider.addSipListener(consumerListener);
-                    }
+                return wrappedConsumer;
 
-                    @Override
-                    public void stop() throws Exception {
-                        _sipProvider.removeSipListener(consumerListener);
-                    }
-
-                    @Override
-                    public Endpoint getEndpoint() {
-                        return endpoint;
-                    }
-                };
-
-                return consumer;
             }
 
             @Override
@@ -217,7 +135,7 @@ public class SipComponent extends DefaultComponent {
         return camelEndpoint;
     }
 
-    public class RequestParser implements TypeConverter {
+    public class SipRequestParser implements TypeConverter {
 
         @Override
         public boolean allowNull() {
@@ -241,29 +159,59 @@ public class SipComponent extends DefaultComponent {
         @Override
         public <T> T mandatoryConvertTo(Class<T> type, Object value) throws TypeConversionException, NoTypeConversionAvailableException {
 
-            if (!type.isAssignableFrom(Request.class)) {
-                throw new NoTypeConversionAvailableException(value, type);
-            }
+            if (!type.isAssignableFrom(Received.class)) {
 
-            final String string;
+                if (value instanceof Sendable) {
 
-            if (value instanceof String) {
-                string = (String) value;
-            } else if (value instanceof Reader) {
-                Reader reader = (Reader) value;
-                try {
-                    string = IOUtils.toString(reader);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
+                    Sendable msg = (Sendable) value;
+
+                    InputStream stream = msg.getAsStream();
+
+                    if (type.isAssignableFrom(InputStream.class)) {
+                        return (T) stream;
+                    } else if (type.isAssignableFrom(Reader.class)) {
+                        return (T) new InputStreamReader(stream);
+                    } else if (type.isAssignableFrom(String.class)) {
+                        try {
+                            return (T) IOUtils.toString(stream, StandardCharsets.UTF_8);
+                        } catch (IOException e) {
+                            throw new TypeConversionException(value, type, e);
+                        }
+                    }
+
+                    throw new NoTypeConversionAvailableException(value, type);
+
+                } else {
+                    throw new NoTypeConversionAvailableException(value, type);
                 }
             } else {
-                throw new NoTypeConversionAvailableException(value, type);
-            }
 
-            try {
-                return (T) _messageFactory.createRequest(string);
-            } catch (ParseException e) {
-                throw new TypeConversionException(value, type, e);
+                final InputStream source;
+
+                if (value instanceof String) {
+                    source = new ByteArrayInputStream(((String) value).getBytes(StandardCharsets.UTF_8));
+                } else if (value instanceof InputStream) {
+                    Reader reader = (Reader) value;
+                    try {
+                        source = new ByteArrayInputStream(IOUtils.toString(reader).getBytes(StandardCharsets.UTF_8));
+                    } catch (IOException e) {
+                        throw new TypeConversionException(value, type, e);
+                    }
+                } else {
+                    source = (InputStream) value;
+                }
+
+                try {
+                    if (type.isAssignableFrom(Request.class)) {
+                        return (T) new RequestReceived(source);
+                    } else if (type.isAssignableFrom(Response.class)) {
+                        return (T) new ResponseReceived(source);
+                    } else {
+                        throw new NoTypeConversionAvailableException(value, type);
+                    }
+                } catch (IOException e) {
+                    throw new TypeConversionException(value, type, e);
+                }
             }
         }
 
@@ -284,78 +232,6 @@ public class SipComponent extends DefaultComponent {
         @Override
         public <T> T tryConvertTo(Class<T> type, Exchange exchange, Object value) {
             return tryConvertTo(type, value);
-        }
-
-    }
-    
-    public class SipMessage extends DefaultMessage {
-        
-        private final EventObject _event;
-        private final Dialog _dialog;
-        private final Transaction _transaction;
-
-        private SipMessage(CamelContext camelContext, RequestEvent requestEvent) {
-            super(camelContext);
-            _dialog = requestEvent.getDialog();
-            _transaction = requestEvent.getServerTransaction();
-            _event = requestEvent;
-            setBody(requestEvent.getRequest());
-        }
-
-        private SipMessage(CamelContext camelContext, ResponseEvent responseEvent) {
-            super(camelContext);
-            _dialog = responseEvent.getDialog();
-            _transaction = responseEvent.getClientTransaction();
-            _event = responseEvent;
-            setBody(responseEvent.getResponse());
-        }
-
-        
-
-        public Dialog getDialog() {
-            return _dialog;
-        }
-
-        public Transaction getTransaction() {
-            return _transaction;
-        }
-
-        public EventObject getEvent() {
-            return _event;
-        }
-        
-    }
-
-    private class DefaultSipListener implements SipListener {
-
-        @Override
-        public void processRequest(RequestEvent requestEvent) {
-
-        }
-
-        @Override
-        public void processResponse(ResponseEvent responseEvent) {
-
-        }
-
-        @Override
-        public void processTimeout(TimeoutEvent timeoutEvent) {
-
-        }
-
-        @Override
-        public void processIOException(IOExceptionEvent exceptionEvent) {
-
-        }
-
-        @Override
-        public void processTransactionTerminated(TransactionTerminatedEvent transactionTerminatedEvent) {
-
-        }
-
-        @Override
-        public void processDialogTerminated(DialogTerminatedEvent dialogTerminatedEvent) {
-
         }
 
     }
