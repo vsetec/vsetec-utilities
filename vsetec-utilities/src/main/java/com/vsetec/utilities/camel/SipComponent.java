@@ -112,9 +112,9 @@ public class SipComponent extends DefaultComponent {
                     @Override
                     public void process(Exchange exchange) throws Exception {
                         
-                        Message in = exchange.getIn();
-                        in.setBody(in.getBody(Sendable.class));
                         processor.process(exchange);
+                        Message in = exchange.getIn();
+                        in.setBody(in.getBody(Received.class));
                         
                     }
                 };
