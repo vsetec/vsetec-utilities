@@ -15,11 +15,8 @@
  */
 package com.vsetec.utilities.camel;
 
+import com.vsetec.sip.MessageReceived;
 import com.vsetec.sip.Received;
-import com.vsetec.sip.Request;
-import com.vsetec.sip.RequestReceived;
-import com.vsetec.sip.Response;
-import com.vsetec.sip.ResponseReceived;
 import com.vsetec.sip.Sendable;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -96,9 +93,6 @@ public class SipComponent extends DefaultComponent {
                     @Override
                     public void process(Exchange exchange) throws Exception {
 
-                        // transform body
-                        Message in = exchange.getIn();
-                        in.setBody(in.getBody(Sendable.class));
                         wrappedProducer.process(exchange);
 
                     }
@@ -111,11 +105,13 @@ public class SipComponent extends DefaultComponent {
                 Processor wrappingProcessor = new Processor() {
                     @Override
                     public void process(Exchange exchange) throws Exception {
-                        
+
                         processor.process(exchange);
                         Message in = exchange.getIn();
-                        in.setBody(in.getBody(Received.class));
-                        
+                        InputStream stream = in.getBody(InputStream.class);
+                        MessageReceived msg = MessageReceived.parse(stream);
+                        in.setBody(msg);
+
                     }
                 };
 
@@ -202,13 +198,7 @@ public class SipComponent extends DefaultComponent {
                 }
 
                 try {
-                    if (type.isAssignableFrom(Request.class)) {
-                        return (T) new RequestReceived(source);
-                    } else if (type.isAssignableFrom(Response.class)) {
-                        return (T) new ResponseReceived(source);
-                    } else {
-                        throw new NoTypeConversionAvailableException(value, type);
-                    }
+                    return (T) MessageReceived.parse(source);
                 } catch (IOException e) {
                     throw new TypeConversionException(value, type, e);
                 }
