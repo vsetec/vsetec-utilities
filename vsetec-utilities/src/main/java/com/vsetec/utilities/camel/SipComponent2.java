@@ -56,7 +56,7 @@ import org.apache.camel.impl.DefaultProducer;
  *
  * @author fedd
  */
-public class SipComponent implements Component {
+public class SipComponent2 implements Component {
 
     private CamelContext _camelContext;
     private final SipFactory _sipFactory;
@@ -64,7 +64,7 @@ public class SipComponent implements Component {
     private final AddressFactory _addressFactory;
     private final MessageFactory _messageFactory;
 
-    public SipComponent(String implementationString) {
+    public SipComponent2(String implementationString) {
 
         _sipFactory = SipFactory.getInstance();
         _sipFactory.setPathName(implementationString);
