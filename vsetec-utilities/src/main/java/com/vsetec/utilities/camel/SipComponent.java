@@ -150,7 +150,7 @@ public class SipComponent extends DefaultComponent {
             super(uri, component);
 
             _endpointParams = endpointParams;
-            if (remaining == null || remaining.trim().length() == 0) {
+            if (remaining.startsWith("proxy")) {
                 _receivingHost = null;
                 _receivingTransport = null;
                 _receivingPort = null;
@@ -169,7 +169,7 @@ public class SipComponent extends DefaultComponent {
                     throw new RuntimeException(e);
                 }
             }
-            _listener._endpointProcessors.put(this, new HashSet<>());
+            //_listener._endpointProcessors.put(this, new HashSet<>());
 
         }
 
@@ -181,7 +181,7 @@ public class SipComponent extends DefaultComponent {
                 @Override
                 public void process(Exchange exchange) throws Exception {
 
-                    Object toSend = exchange.getIn().getBody();
+                    org.apache.camel.Message toSend = exchange.getIn();
                     if (!(toSend instanceof CamelSipMessage)) {
                         //TODO: convert to sipmessage somehow and send
                         return;
@@ -195,6 +195,10 @@ public class SipComponent extends DefaultComponent {
 
                         Request request = message.getMessage();
                         ServerTransaction serverTransaction = message.getTransaction();
+                        if (serverTransaction == null) {
+                            serverTransaction = message.getProvider().getNewServerTransaction(request);
+                        }
+
                         // we may respond or forward to another dialog
                         String responseCode = (String) _endpointParams.get("responseCode");
 
@@ -268,6 +272,7 @@ public class SipComponent extends DefaultComponent {
                             // remember the server transaction, to forward back the responses
                             clientTransaction.setApplicationData(serverTransaction);
 
+                            System.out.println("**********SEND REQ*************\n" + newRequest.toString());
                             clientTransaction.sendRequest();
 
                         }
@@ -280,6 +285,7 @@ public class SipComponent extends DefaultComponent {
                         if (_receivingHost != null) { // we have a destination like ws:10.75.2.2
                             // let's forward our response there
                             // TODO: arbitrary response forwarding
+                            System.out.println("**********NOT SEND RESP*******\n" + newResponse.toString());
                             return;
 
                         } else {
@@ -290,9 +296,11 @@ public class SipComponent extends DefaultComponent {
                             if (clientTransaction == null) {
                                 // send to the via address
                                 SipProvider sender = message.getProvider();
+                                System.out.println("**********SEND RESP NONTRAN*******\n" + newResponse.toString());
                                 sender.sendResponse(newResponse);
                             } else {
                                 ServerTransaction serverTransaction = (ServerTransaction) clientTransaction.getApplicationData();
+                                System.out.println("**********SEND RESP TRAN***********\n" + newResponse.toString());
                                 serverTransaction.sendResponse(newResponse);
                             }
                         }
@@ -308,43 +316,52 @@ public class SipComponent extends DefaultComponent {
 
             if (_receivingTransport != null && _receivingPort != null && _receivingPort > 0) {
                 String key = _receivingTransport + ":" + _receivingPort;
-                SipProvider ret = _sipProvidersByPortAndTransport.get(key);
-                if (ret == null) {
-                    try {
-                        ListeningPoint lp = _sipStack.createListeningPoint(_ourHost, _receivingPort, _receivingTransport);
-                        ret = _sipStack.createSipProvider(lp);
-                        _sipProvidersByPortAndTransport.put(key, ret);
-                    } catch (InvalidArgumentException | ObjectInUseException | TransportNotSupportedException e) {
-                        throw new RuntimeException(e);
+                final SipProvider sipProvider;
+                {
+                    SipProvider ret = _sipProvidersByPortAndTransport.get(key);
+                    if (ret == null) {
+                        try {
+                            ListeningPoint lp = _sipStack.createListeningPoint(_ourHost, _receivingPort, _receivingTransport);
+                            ret = _sipStack.createSipProvider(lp);
+                            _sipProvidersByPortAndTransport.put(key, ret);
+                            ret.addSipListener(_listener);
+                            _listener._providerProcessors.put(ret, new HashSet(4));
+                        } catch (InvalidArgumentException | ObjectInUseException | TransportNotSupportedException | TooManyListenersException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                    sipProvider = ret;
+                }
+
+                CamelSipConsumerProcessor wrappingProcessor = new CamelSipConsumerProcessor(endpoint) {
+                    @Override
+                    public void process(Exchange exchange) throws Exception {
+                        processor.process(exchange);
+                    }
+                };
+
+                Consumer consumer = new Consumer() {
+
+                    @Override
+                    public void start() throws Exception {
+                        _listener._providerProcessors.get(sipProvider).add(wrappingProcessor);
                     }
 
-                    try {
-                        ret.addSipListener(_listener);
-                    } catch (TooManyListenersException e) {
-                        throw new RuntimeException(e);
+                    @Override
+                    public void stop() throws Exception {
+                        _listener._providerProcessors.get(sipProvider).remove(wrappingProcessor);
                     }
-                }
+
+                    @Override
+                    public Endpoint getEndpoint() {
+                        return endpoint;
+                    }
+                };
+                return consumer;
+            } else {
+                return null;
             }
 
-            Consumer consumer = new Consumer() {
-
-                @Override
-                public void start() throws Exception {
-                    _listener._endpointProcessors.get(CamelSipEndpoint.this).add(processor);
-                }
-
-                @Override
-                public void stop() throws Exception {
-                    _listener._endpointProcessors.get(CamelSipEndpoint.this).remove(processor);
-                }
-
-                @Override
-                public Endpoint getEndpoint() {
-                    return endpoint;
-                }
-            };
-
-            return consumer;
         }
 
         @Override
@@ -353,7 +370,40 @@ public class SipComponent extends DefaultComponent {
         }
     }
 
-    private class CamelSipMessage extends DefaultMessage {
+    private abstract class CamelSipConsumerProcessor implements Processor {
+
+        private final Endpoint _endpoint;
+
+        private CamelSipConsumerProcessor(Endpoint endpoint) {
+            _endpoint = endpoint;
+        }
+
+        private void _processRequestEvent(RequestEvent event) {
+            try {
+                System.out.println("**********RECV REQ*************\n" + event.getRequest().toString());
+                Exchange exchange = new DefaultExchange(_endpoint);
+                CamelSipMessage in = new CamelSipMessage(getCamelContext(), event);
+                exchange.setIn(in);
+                process(exchange);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        private void _processResponseEvent(ResponseEvent event) {
+            try {
+                System.out.println("**********RECV RESP*************\n" + event.getResponse().toString());
+                Exchange exchange = new DefaultExchange(_endpoint);
+                CamelSipMessage in = new CamelSipMessage(getCamelContext(), event);
+                exchange.setIn(in);
+                process(exchange);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    public class CamelSipMessage extends DefaultMessage {
 
         private final EventObject _event;
         private final SipProvider _provider;
@@ -417,39 +467,22 @@ public class SipComponent extends DefaultComponent {
 
     private class CamelSipListener implements SipListener {
 
-        private final Map<CamelSipEndpoint, Set<Processor>> _endpointProcessors = new HashMap<>();
+        private final Map<SipProvider, Set<CamelSipConsumerProcessor>> _providerProcessors = new HashMap<>();
 
-        private void _processAny(EventObject event) {
-
-            for (Map.Entry<CamelSipEndpoint, Set<Processor>> endpointProcessor : _endpointProcessors.entrySet()) {
-                for (Processor processor : endpointProcessor.getValue()) {
-
-                    // originate an exchange
-                    Exchange exchange = new DefaultExchange(endpointProcessor.getKey());
-                    CamelSipMessage in;
-                    if (event instanceof RequestEvent) {
-                        in = new CamelSipMessage(getCamelContext(), (ResponseEvent) event);
-                    } else {
-                        in = new CamelSipMessage(getCamelContext(), (ResponseEvent) event);
-                    }
-                    exchange.setIn(in);
-                    try {
-                        processor.process(exchange);
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                }
+        @Override
+        public void processRequest(RequestEvent event) {
+            SipProvider originatingProvider = (SipProvider) event.getSource();
+            for (CamelSipConsumerProcessor processor : _providerProcessors.get(originatingProvider)) {
+                processor._processRequestEvent(event);
             }
         }
 
         @Override
-        public void processRequest(RequestEvent requestEvent) {
-            _processAny(requestEvent);
-        }
-
-        @Override
-        public void processResponse(ResponseEvent responseEvent) {
-            _processAny(responseEvent);
+        public void processResponse(ResponseEvent event) {
+            SipProvider originatingProvider = (SipProvider) event.getSource();
+            for (CamelSipConsumerProcessor processor : _providerProcessors.get(originatingProvider)) {
+                processor._processResponseEvent(event);
+            }
         }
 
         @Override
