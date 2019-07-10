@@ -15,16 +15,14 @@
  */
 package com.vsetec.utilities.camel;
 
-import java.io.IOException;
-import java.io.Reader;
+import gov.nist.javax.sip.stack.NioMessageProcessorFactory;
 import java.net.URISyntaxException;
-import java.text.ParseException;
-import java.util.ArrayList;
 import java.util.EventObject;
 import java.util.HashMap;
-import java.util.List;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.TooManyListenersException;
 import javax.sip.ClientTransaction;
 import javax.sip.Dialog;
@@ -48,7 +46,6 @@ import javax.sip.TransportNotSupportedException;
 import javax.sip.address.Address;
 import javax.sip.address.AddressFactory;
 import javax.sip.address.SipURI;
-import javax.sip.address.URI;
 import javax.sip.header.HeaderFactory;
 import javax.sip.header.RecordRouteHeader;
 import javax.sip.header.RouteHeader;
@@ -62,18 +59,13 @@ import org.apache.camel.Component;
 import org.apache.camel.Consumer;
 import org.apache.camel.Endpoint;
 import org.apache.camel.Exchange;
-import org.apache.camel.ExchangePattern;
-import org.apache.camel.NoTypeConversionAvailableException;
 import org.apache.camel.Processor;
 import org.apache.camel.Producer;
-import org.apache.camel.TypeConversionException;
-import org.apache.camel.TypeConverter;
 import org.apache.camel.impl.DefaultComponent;
 import org.apache.camel.impl.DefaultEndpoint;
 import org.apache.camel.impl.DefaultExchange;
 import org.apache.camel.impl.DefaultMessage;
 import org.apache.camel.impl.DefaultProducer;
-import org.apache.commons.io.IOUtils;
 
 /**
  *
@@ -84,6 +76,7 @@ public class SipComponent extends DefaultComponent {
     private final SipFactory _sipFactory = SipFactory.getInstance();
     private final SipStack _sipStack;
     private final Map<String, SipProvider> _sipProvidersByPortAndTransport = new HashMap<>(3);
+    private final CamelSipListener _listener = new CamelSipListener();
     private final String _ourHost;
     private final HeaderFactory _headerFactory;
     private final AddressFactory _addressFactory;
@@ -109,7 +102,10 @@ public class SipComponent extends DefaultComponent {
 
         Properties properties = new Properties();
         properties.setProperty("javax.sip.STACK_NAME", "delaSipStack");
-        properties.putAll(stackParameters);
+        properties.setProperty("gov.nist.javax.sip.MESSAGE_PROCESSOR_FACTORY", NioMessageProcessorFactory.class.getName());
+        if (stackParameters != null) {
+            properties.putAll(stackParameters);
+        }
         properties.remove("javax.sip.IP_ADDRESS");
         try {
             _sipStack = _sipFactory.createSipStack(properties);
@@ -148,10 +144,11 @@ public class SipComponent extends DefaultComponent {
         private final String _receivingHost;
         private final String _receivingTransport;
         private final Integer _receivingPort;
-        private final CamelSipListener _listener = new CamelSipListener(this);
 
         private CamelSipEndpoint(String uri, Component component, String remaining, Map<String, Object> endpointParams) {
+
             super(uri, component);
+
             _endpointParams = endpointParams;
             if (remaining == null || remaining.trim().length() == 0) {
                 _receivingHost = null;
@@ -172,27 +169,8 @@ public class SipComponent extends DefaultComponent {
                     throw new RuntimeException(e);
                 }
             }
-        }
+            _listener._endpointProcessors.put(this, new HashSet<>());
 
-        private synchronized SipProvider _getSipProvider(int port, String transport) {
-            String key = transport + ":" + port;
-            SipProvider ret = _sipProvidersByPortAndTransport.get(key);
-            if (ret == null) {
-                try {
-                    ListeningPoint lp = _sipStack.createListeningPoint(_ourHost, port, transport);
-                    ret = _sipStack.createSipProvider(lp);
-                    _sipProvidersByPortAndTransport.put(key, ret);
-                } catch (InvalidArgumentException | ObjectInUseException | TransportNotSupportedException e) {
-                    throw new RuntimeException(e);
-                }
-                
-                try {
-                    ret.addSipListener(_listener);
-                } catch (TooManyListenersException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-            return ret;
         }
 
         @Override
@@ -217,6 +195,38 @@ public class SipComponent extends DefaultComponent {
 
                         Request request = message.getMessage();
                         ServerTransaction serverTransaction = message.getTransaction();
+                        // we may respond or forward to another dialog
+                        String responseCode = (String) _endpointParams.get("responseCode");
+
+                        if (responseCode != null) {
+                            // let's respond
+                            Response response = _messageFactory.createResponse(Integer.parseInt(responseCode), request);
+                            serverTransaction.sendResponse(response);
+                        } else if (_receivingHost == null) {
+                            // let's forward our request there
+                            Request newRequest = (Request) request.clone();
+
+                            RouteHeader routeHeader = (RouteHeader) newRequest.getHeader(RouteHeader.NAME);
+                            SipURI routeUri = (SipURI) routeHeader.getAddress().getURI();
+                            ViaHeader viaHeader = _headerFactory.createViaHeader(_ourHost, routeUri.getPort(), routeUri.getTransportParam(), null);
+                            newRequest.addFirst(viaHeader);
+
+                            SipURI recordRouteUri = _addressFactory.createSipURI(null, _ourHost);
+                            Address recordRouteAddress = _addressFactory.createAddress(null, recordRouteUri);
+                            recordRouteUri.setPort(routeUri.getPort());
+                            recordRouteUri.setLrParam();
+                            recordRouteUri.setTransportParam(routeUri.getTransportParam());
+                            RecordRouteHeader recordRoute = _headerFactory.createRecordRouteHeader(recordRouteAddress);
+                            newRequest.addHeader(recordRoute);
+
+                            // will use the transport specified in route header to send
+                            ClientTransaction clientTransaction = message.getProvider().getNewClientTransaction(newRequest);
+
+                            // remember the server transaction, to forward back the responses
+                            clientTransaction.setApplicationData(serverTransaction);
+
+                            clientTransaction.sendRequest();
+                        }
 
                         // request. what to do with it?
                         if (_receivingHost != null) { // we have a destination like udp:10.23.2.2
@@ -248,22 +258,18 @@ public class SipComponent extends DefaultComponent {
                             Address recordRouteAddress = _addressFactory.createAddress(null, recordRouteUri);
                             recordRouteUri.setPort(responseListeningPort);
                             recordRouteUri.setLrParam();
+                            recordRouteUri.setTransportParam(_receivingTransport);
                             RecordRouteHeader recordRoute = _headerFactory.createRecordRouteHeader(recordRouteAddress);
                             newRequest.addHeader(recordRoute);
 
                             // will use the transport specified in route header to send
                             ClientTransaction clientTransaction = receivingProvider.getNewClientTransaction(newRequest);
 
-                            // remember the server transaction
+                            // remember the server transaction, to forward back the responses
                             clientTransaction.setApplicationData(serverTransaction);
 
                             clientTransaction.sendRequest();
-                            
 
-                        } else { // we don't have any destination
-                            // let's respond
-                            Response response = _messageFactory.createResponse((int) _endpointParams.getOrDefault("statusCode", 200), request);
-                            serverTransaction.sendResponse(response);
                         }
                     } else {
 
@@ -301,19 +307,35 @@ public class SipComponent extends DefaultComponent {
             final Endpoint endpoint = this;
 
             if (_receivingTransport != null && _receivingPort != null && _receivingPort > 0) {
-                _getSipProvider(_receivingPort, _receivingTransport);
+                String key = _receivingTransport + ":" + _receivingPort;
+                SipProvider ret = _sipProvidersByPortAndTransport.get(key);
+                if (ret == null) {
+                    try {
+                        ListeningPoint lp = _sipStack.createListeningPoint(_ourHost, _receivingPort, _receivingTransport);
+                        ret = _sipStack.createSipProvider(lp);
+                        _sipProvidersByPortAndTransport.put(key, ret);
+                    } catch (InvalidArgumentException | ObjectInUseException | TransportNotSupportedException e) {
+                        throw new RuntimeException(e);
+                    }
+
+                    try {
+                        ret.addSipListener(_listener);
+                    } catch (TooManyListenersException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
             }
 
             Consumer consumer = new Consumer() {
 
                 @Override
                 public void start() throws Exception {
-                    _listener._processors.add(processor);
+                    _listener._endpointProcessors.get(CamelSipEndpoint.this).add(processor);
                 }
 
                 @Override
                 public void stop() throws Exception {
-                    _listener._processors.remove(processor);
+                    _listener._endpointProcessors.get(CamelSipEndpoint.this).remove(processor);
                 }
 
                 @Override
@@ -395,31 +417,27 @@ public class SipComponent extends DefaultComponent {
 
     private class CamelSipListener implements SipListener {
 
-        private final List<Processor> _processors = new ArrayList<>();
-        private final CamelSipEndpoint _endpoint;
-
-        public CamelSipListener(CamelSipEndpoint endpoint) {
-            _endpoint = endpoint;
-        }
+        private final Map<CamelSipEndpoint, Set<Processor>> _endpointProcessors = new HashMap<>();
 
         private void _processAny(EventObject event) {
-            // originate an exchange
-            Exchange exchange = new DefaultExchange(_endpoint);
-            CamelSipMessage in;
-            if (event instanceof RequestEvent) {
-                RequestEvent requestEvent = (RequestEvent) event;
-                in = new CamelSipMessage(_endpoint.getCamelContext(), requestEvent);
-                requestEvent.getServerTransaction().setApplicationData(new Object[]{_endpoint._receivingPort, _endpoint._receivingTransport});
-            } else {
-                in = new CamelSipMessage(_endpoint.getCamelContext(), (ResponseEvent) event);
-            }
-            exchange.setIn(in);
 
-            for (Processor processor : _processors) {
-                try {
-                    processor.process(exchange);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
+            for (Map.Entry<CamelSipEndpoint, Set<Processor>> endpointProcessor : _endpointProcessors.entrySet()) {
+                for (Processor processor : endpointProcessor.getValue()) {
+
+                    // originate an exchange
+                    Exchange exchange = new DefaultExchange(endpointProcessor.getKey());
+                    CamelSipMessage in;
+                    if (event instanceof RequestEvent) {
+                        in = new CamelSipMessage(getCamelContext(), (ResponseEvent) event);
+                    } else {
+                        in = new CamelSipMessage(getCamelContext(), (ResponseEvent) event);
+                    }
+                    exchange.setIn(in);
+                    try {
+                        processor.process(exchange);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
                 }
             }
         }
