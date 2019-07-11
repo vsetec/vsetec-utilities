@@ -17,7 +17,6 @@ package com.vsetec.utilities.camel;
 
 import gov.nist.javax.sip.stack.NioMessageProcessorFactory;
 import java.net.URISyntaxException;
-import java.util.EventObject;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -41,7 +40,9 @@ import javax.sip.SipProvider;
 import javax.sip.SipStack;
 import javax.sip.TimeoutEvent;
 import javax.sip.Transaction;
+import javax.sip.TransactionAlreadyExistsException;
 import javax.sip.TransactionTerminatedEvent;
+import javax.sip.TransactionUnavailableException;
 import javax.sip.TransportNotSupportedException;
 import javax.sip.address.Address;
 import javax.sip.address.AddressFactory;
@@ -55,7 +56,6 @@ import javax.sip.message.MessageFactory;
 import javax.sip.message.Request;
 import javax.sip.message.Response;
 import org.apache.camel.CamelContext;
-import org.apache.camel.Component;
 import org.apache.camel.Consumer;
 import org.apache.camel.Endpoint;
 import org.apache.camel.Exchange;
@@ -130,244 +130,326 @@ public class SipComponent extends DefaultComponent {
     @Override
     protected Endpoint createEndpoint(String uri, String remaining, Map<String, Object> endpointParams) throws Exception {
 
-        return new CamelSipEndpoint(uri, this, remaining, endpointParams);
+        //return new CamelSipEndpoint(uri, this, remaining, endpointParams);
+        final String receivingHost;
+        final String receivingTransport;
+        final Integer receivingPort;
+        final Integer responseCode;
 
-    }
-
-    private class CamelSipEndpoint extends DefaultEndpoint {
-
-        // sip:ws:0.0.0.0:9393  -- source
-        // sip:udp:0.0.0.0:5060   -- source
-        // sip:udp:10.10.2.3:5060   -- destination. this is a remote host
-        // sip:  --- empty sender-receiver
-        private final Map<String, Object> _endpointParams;
-        private final String _receivingHost;
-        private final String _receivingTransport;
-        private final Integer _receivingPort;
-
-        private CamelSipEndpoint(String uri, Component component, String remaining, Map<String, Object> endpointParams) {
-
-            super(uri, component);
-
-            _endpointParams = endpointParams;
-            if (remaining.startsWith("proxy")) {
-                _receivingHost = null;
-                _receivingTransport = null;
-                _receivingPort = null;
-            } else {
-                try {
-                    java.net.URI endpointAddress = new java.net.URI(remaining);
-                    _receivingHost = endpointAddress.getHost();
-                    _receivingTransport = endpointAddress.getScheme();
-                    int destinationPortTmp = endpointAddress.getPort();
-                    if (destinationPortTmp > 0) {
-                        _receivingPort = destinationPortTmp;
-                    } else {
-                        _receivingPort = null;
-                    }
-                } catch (URISyntaxException e) {
-                    throw new RuntimeException(e);
+        String responseCodeString = (String) endpointParams.get("responseCode");
+        if (responseCodeString == null) {
+            responseCode = null;
+        } else {
+            responseCode = Integer.parseInt(responseCodeString);
+        }
+        if (remaining.startsWith("proxy")) {
+            receivingHost = null;
+            receivingTransport = null;
+            receivingPort = null;
+        } else {
+            try {
+                java.net.URI endpointAddress = new java.net.URI(remaining);
+                receivingHost = endpointAddress.getHost();
+                receivingTransport = endpointAddress.getScheme();
+                int destinationPortTmp = endpointAddress.getPort();
+                if (destinationPortTmp > 0) {
+                    receivingPort = destinationPortTmp;
+                } else {
+                    receivingPort = null;
                 }
+            } catch (URISyntaxException e) {
+                throw new RuntimeException(e);
             }
-            //_listener._endpointProcessors.put(this, new HashSet<>());
-
         }
 
-        @Override
-        public Producer createProducer() throws Exception {
-
-            return new DefaultProducer(this) {
+        if (receivingHost == null) {
+            return new DefaultEndpoint(uri, this) {
+                @Override
+                public Producer createProducer() throws Exception {
+                    return new CamelSipProxyProducer(this, responseCode);
+                }
 
                 @Override
-                public void process(Exchange exchange) throws Exception {
+                public Consumer createConsumer(Processor processor) throws Exception {
+                    return null;
+                }
 
-                    org.apache.camel.Message toSend = exchange.getIn();
-                    if (!(toSend instanceof CamelSipMessage)) {
-                        //TODO: convert to sipmessage somehow and send
-                        return;
-                    }
+                @Override
+                public boolean isSingleton() {
+                    return true;
+                }
 
-                    // sending
-                    CamelSipMessage message = (CamelSipMessage) toSend;
+                @Override
+                public boolean isLenientProperties() {
+                    return true;
+                }
+            };
+        } else {
+            return new DefaultEndpoint(uri, this) {
+                @Override
+                public Producer createProducer() throws Exception {
+                    return new CamelSipForwardingProducer(this, receivingHost, receivingPort, receivingTransport, responseCode);
+                }
 
-                    // we've got message prepared for us, need to send something somewhere
-                    if (message.isRequest()) {
+                @Override
+                public Consumer createConsumer(Processor processor) throws Exception {
+                    return new CamelSipConsumer(this, receivingHost, receivingPort, receivingTransport, responseCode, processor);
+                }
 
-                        Request request = message.getMessage();
-                        ServerTransaction serverTransaction = message.getTransaction();
-                        if (serverTransaction == null) {
-                            serverTransaction = message.getProvider().getNewServerTransaction(request);
-                        }
+                @Override
+                public boolean isSingleton() {
+                    return true;
+                }
 
-                        // we may respond or forward to another dialog
-                        String responseCode = (String) _endpointParams.get("responseCode");
-
-                        if (responseCode != null) {
-                            // let's respond
-                            Response response = _messageFactory.createResponse(Integer.parseInt(responseCode), request);
-                            serverTransaction.sendResponse(response);
-                        } else if (_receivingHost == null) {
-                            // let's forward our request there
-                            Request newRequest = (Request) request.clone();
-
-                            RouteHeader routeHeader = (RouteHeader) newRequest.getHeader(RouteHeader.NAME);
-                            SipURI routeUri = (SipURI) routeHeader.getAddress().getURI();
-                            ViaHeader viaHeader = _headerFactory.createViaHeader(_ourHost, routeUri.getPort(), routeUri.getTransportParam(), null);
-                            newRequest.addFirst(viaHeader);
-
-                            SipURI recordRouteUri = _addressFactory.createSipURI(null, _ourHost);
-                            Address recordRouteAddress = _addressFactory.createAddress(null, recordRouteUri);
-                            recordRouteUri.setPort(routeUri.getPort());
-                            recordRouteUri.setLrParam();
-                            recordRouteUri.setTransportParam(routeUri.getTransportParam());
-                            RecordRouteHeader recordRoute = _headerFactory.createRecordRouteHeader(recordRouteAddress);
-                            newRequest.addHeader(recordRoute);
-
-                            // will use the transport specified in route header to send
-                            ClientTransaction clientTransaction = message.getProvider().getNewClientTransaction(newRequest);
-
-                            // remember the server transaction, to forward back the responses
-                            clientTransaction.setApplicationData(serverTransaction);
-
-                            clientTransaction.sendRequest();
-                        }
-
-                        // request. what to do with it?
-                        if (_receivingHost != null) { // we have a destination like udp:10.23.2.2
-
-                            // let's forward our request there
-                            Request newRequest = (Request) request.clone();
-
-                            // receiving = destination
-                            // where? add a route there
-                            SipURI destinationUri = _addressFactory.createSipURI(null, _receivingHost);
-                            if (_receivingPort != null) {
-                                destinationUri.setPort(_receivingPort);
-                            }
-                            destinationUri.setLrParam();
-                            destinationUri.setTransportParam(_receivingTransport);
-                            Address destinationAddress = _addressFactory.createAddress(null, destinationUri);
-                            RouteHeader routeHeader = _headerFactory.createRouteHeader(destinationAddress);
-                            newRequest.addFirst(routeHeader);
-
-                            // where from? add a via and a record-route
-                            SipProvider receivingProvider = message.getProvider();
-                            ListeningPoint listeningPoint = receivingProvider.getListeningPoint(_receivingTransport);
-                            int responseListeningPort = listeningPoint.getPort();
-
-                            ViaHeader viaHeader = _headerFactory.createViaHeader(_ourHost, responseListeningPort, _receivingTransport, null);
-                            newRequest.addFirst(viaHeader);
-
-                            SipURI recordRouteUri = _addressFactory.createSipURI(null, _ourHost);
-                            Address recordRouteAddress = _addressFactory.createAddress(null, recordRouteUri);
-                            recordRouteUri.setPort(responseListeningPort);
-                            recordRouteUri.setLrParam();
-                            recordRouteUri.setTransportParam(_receivingTransport);
-                            RecordRouteHeader recordRoute = _headerFactory.createRecordRouteHeader(recordRouteAddress);
-                            newRequest.addHeader(recordRoute);
-
-                            // will use the transport specified in route header to send
-                            ClientTransaction clientTransaction = receivingProvider.getNewClientTransaction(newRequest);
-
-                            // remember the server transaction, to forward back the responses
-                            clientTransaction.setApplicationData(serverTransaction);
-
-                            System.out.println("**********SEND REQ*************\n" + newRequest.toString());
-                            clientTransaction.sendRequest();
-
-                        }
-                    } else {
-
-                        Response response = message.getMessage();
-                        Response newResponse = (Response) response.clone();
-                        ClientTransaction clientTransaction = message.getTransaction();
-
-                        if (_receivingHost != null) { // we have a destination like ws:10.75.2.2
-                            // let's forward our response there
-                            // TODO: arbitrary response forwarding
-                            System.out.println("**********NOT SEND RESP*******\n" + newResponse.toString());
-                            return;
-
-                        } else {
-                            // we have to forward the response to the request's initial author
-
-                            // as it is a response originated here, we can get a server transaction
-                            newResponse.removeFirst(ViaHeader.NAME);
-                            if (clientTransaction == null) {
-                                // send to the via address
-                                SipProvider sender = message.getProvider();
-                                System.out.println("**********SEND RESP NONTRAN*******\n" + newResponse.toString());
-                                sender.sendResponse(newResponse);
-                            } else {
-                                ServerTransaction serverTransaction = (ServerTransaction) clientTransaction.getApplicationData();
-                                System.out.println("**********SEND RESP TRAN***********\n" + newResponse.toString());
-                                serverTransaction.sendResponse(newResponse);
-                            }
-                        }
-                    }
+                @Override
+                public boolean isLenientProperties() {
+                    return true;
                 }
             };
         }
 
+    }
+
+    private class CamelSipForwardingProducer extends DefaultProducer {
+
+        private final String _destinationHost;
+        private final Integer _destinationPort;
+        private final String _sendingTransport;
+        private final Integer _responseCode;
+
+        public CamelSipForwardingProducer(Endpoint endpoint, String destinationHost, Integer destinationPort, String transport, Integer responseCode) {
+            super(endpoint);
+            _destinationHost = destinationHost;
+            _destinationPort = destinationPort;
+            _sendingTransport = transport;
+            _responseCode = responseCode;
+        }
+
         @Override
-        public Consumer createConsumer(Processor processor) throws Exception {
+        public void process(Exchange exchange) throws Exception {
+            org.apache.camel.Message toSend = exchange.getIn();
+            if (!(toSend instanceof CamelSipMessage)) {
+                //TODO: convert to sipmessage somehow and send
+                return;
+            }
+            CamelSipMessage message = (CamelSipMessage) toSend;
 
-            final Endpoint endpoint = this;
+            // we've got message came from elsewhere, need to forward it as a proxy
+            if (message.isRequest()) {
 
-            if (_receivingTransport != null && _receivingPort != null && _receivingPort > 0) {
-                String key = _receivingTransport + ":" + _receivingPort;
-                final SipProvider sipProvider;
-                {
-                    SipProvider ret = _sipProvidersByPortAndTransport.get(key);
-                    if (ret == null) {
-                        try {
-                            ListeningPoint lp = _sipStack.createListeningPoint(_ourHost, _receivingPort, _receivingTransport);
-                            ret = _sipStack.createSipProvider(lp);
-                            _sipProvidersByPortAndTransport.put(key, ret);
-                            ret.addSipListener(_listener);
-                            _listener._providerProcessors.put(ret, new HashSet(4));
-                        } catch (InvalidArgumentException | ObjectInUseException | TransportNotSupportedException | TooManyListenersException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }
-                    sipProvider = ret;
+                // need to forward a request as a proxy
+                Request request = message.getMessage();
+                ServerTransaction serverTransaction = message.getTransaction();
+
+                // we may respond right here
+                if (_responseCode != null) {
+                    // let's respond
+                    Response response = _messageFactory.createResponse(_responseCode, request);
+                    System.out.println("**********SEND RESP BY CODE BEFORE FORWARD*************\n" + response.toString());
+                    serverTransaction.sendResponse(response);
                 }
 
-                CamelSipConsumerProcessor wrappingProcessor = new CamelSipConsumerProcessor(endpoint) {
+                // actual forwarding
+                // let's forward our request there
+                Request newRequest = (Request) request.clone();
+
+                // receiving = destination
+                // where? add a route there
+                SipURI destinationUri = _addressFactory.createSipURI(null, _destinationHost);
+                if (_destinationPort != null) {
+                    destinationUri.setPort(_destinationPort);
+                }
+                destinationUri.setLrParam();
+                destinationUri.setTransportParam(_sendingTransport);
+                Address destinationAddress = _addressFactory.createAddress(null, destinationUri);
+                RouteHeader routeHeader = _headerFactory.createRouteHeader(destinationAddress);
+                newRequest.addFirst(routeHeader);
+
+                // where from? add a via and a record-route
+                SipProvider receivingProvider = message.getProvider();
+                ListeningPoint listeningPoint = receivingProvider.getListeningPoint(_sendingTransport);
+                int responseListeningPort = listeningPoint.getPort();
+
+                ViaHeader viaHeader = _headerFactory.createViaHeader(_ourHost, responseListeningPort, _sendingTransport, null);
+                newRequest.addFirst(viaHeader);
+
+                SipURI recordRouteUri = _addressFactory.createSipURI(null, _ourHost);
+                Address recordRouteAddress = _addressFactory.createAddress(null, recordRouteUri);
+                recordRouteUri.setPort(responseListeningPort);
+                recordRouteUri.setLrParam();
+                recordRouteUri.setTransportParam(_sendingTransport);
+                RecordRouteHeader recordRoute = _headerFactory.createRecordRouteHeader(recordRouteAddress);
+                newRequest.addHeader(recordRoute);
+
+                // will use the transport specified in route header to send
+                ClientTransaction clientTransaction = receivingProvider.getNewClientTransaction(newRequest);
+
+                // remember the server transaction, to forward back the responses
+                clientTransaction.setApplicationData(serverTransaction);
+
+                System.out.println("**********FWD REQ*************\n" + newRequest.toString());
+                clientTransaction.sendRequest();
+
+            } else {
+                // let's forward our response there
+                // TODO: arbitrary response forwarding
+                System.out.println("**********NO FWD OF RESPONSE*******\n\n\n");
+                return;
+
+            }
+
+        }
+
+    }
+
+    private class CamelSipProxyProducer extends DefaultProducer {
+
+        private final Integer _responseCode;
+
+        public CamelSipProxyProducer(Endpoint endpoint, Integer responseCode) {
+            super(endpoint);
+            _responseCode = responseCode;
+        }
+
+        @Override
+        public void process(Exchange exchange) throws Exception {
+            org.apache.camel.Message toSend = exchange.getIn();
+            if (!(toSend instanceof CamelSipMessage)) {
+                //TODO: convert to sipmessage somehow and send
+                return;
+            }
+            CamelSipMessage message = (CamelSipMessage) toSend;
+
+            // we've got message came from elsewhere, need to forward it as a proxy
+            if (message.isRequest()) {
+
+                // need to forward a request as a proxy
+                Request request = message.getMessage();
+                ServerTransaction serverTransaction = message.getTransaction();
+
+                // we may respond right here
+                if (_responseCode != null) {
+                    // let's respond
+                    Response response = _messageFactory.createResponse(_responseCode, request);
+                    System.out.println("**********SEND RESP BY CODE BEFORE PROXYING*************\n" + response.toString());
+                    serverTransaction.sendResponse(response);
+                }
+
+                RouteHeader routeHeader = (RouteHeader) request.getHeader(RouteHeader.NAME);
+                SipURI routeUri = (SipURI) routeHeader.getAddress().getURI();
+                ViaHeader viaHeader = _headerFactory.createViaHeader(_ourHost, routeUri.getPort(), routeUri.getTransportParam(), null);
+
+                SipURI recordRouteUri = _addressFactory.createSipURI(null, _ourHost);
+                Address recordRouteAddress = _addressFactory.createAddress(null, recordRouteUri);
+                recordRouteUri.setPort(routeUri.getPort());
+                recordRouteUri.setLrParam();
+                recordRouteUri.setTransportParam(routeUri.getTransportParam());
+                RecordRouteHeader recordRoute = _headerFactory.createRecordRouteHeader(recordRouteAddress);
+
+                // actual forwarding 
+                Request newRequest = (Request) request.clone();
+                newRequest.addFirst(viaHeader);
+                newRequest.addHeader(recordRoute);
+
+                ClientTransaction clientTransaction = message.getProvider().getNewClientTransaction(newRequest);
+                clientTransaction.setApplicationData(serverTransaction);
+
+                // will use the transport specified in route header to send
+                System.out.println("**********PROXYSEND REQ*************\n" + newRequest.toString());
+                clientTransaction.sendRequest();
+            } else {
+                // it is a response to our previously forwarded request
+                Response response = message.getMessage();
+                Response newResponse = (Response) response.clone();
+                newResponse.removeFirst(ViaHeader.NAME);
+
+                // actual forwarding 
+                // as it is a response originated here, we can get a server transaction
+                ClientTransaction clientTransaction = message.getTransaction();
+
+                if (clientTransaction == null) {
+                    // send to the via address
+                    SipProvider sender = message.getProvider();
+                    System.out.println("**********PROXYSEND RESP NONTRAN*******\n\n\n");
+                    sender.sendResponse(newResponse);
+                } else {
+                    ServerTransaction serverTransaction = (ServerTransaction) clientTransaction.getApplicationData();
+                    System.out.println("**********PROXYSEND RESP TRAN***********\n" + newResponse.toString());
+                    serverTransaction.sendResponse(newResponse);
+                }
+
+            }
+
+        }
+
+    }
+
+    private class CamelSipConsumer implements Consumer {
+
+        private final Endpoint _endpoint;
+        private final Integer _responseCode;
+        private final SipProvider _sipProvider;
+        private final CamelSipConsumerProcessor _wrappingProcessor;
+
+        public CamelSipConsumer(Endpoint endpoint, String listeningHost, Integer listeningPort, String transport, Integer responseCode, Processor processor) {
+            _responseCode = responseCode;
+            _endpoint = endpoint;
+
+            String key = transport + ":" + listeningPort;
+
+            SipProvider ret = _sipProvidersByPortAndTransport.get(key);
+            if (ret == null) {
+                try {
+                    ListeningPoint lp = _sipStack.createListeningPoint(_ourHost, listeningPort, transport);
+                    ret = _sipStack.createSipProvider(lp);
+                    _sipProvidersByPortAndTransport.put(key, ret);
+                    ret.addSipListener(_listener);
+                    _listener._providerProcessors.put(ret, new HashSet(4));
+                } catch (InvalidArgumentException | ObjectInUseException | TransportNotSupportedException | TooManyListenersException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            _sipProvider = ret;
+
+            if (_responseCode == null) {
+                _wrappingProcessor = new CamelSipConsumerProcessor(endpoint) {
                     @Override
                     public void process(Exchange exchange) throws Exception {
                         processor.process(exchange);
                     }
                 };
-
-                Consumer consumer = new Consumer() {
-
+            } else {
+                _wrappingProcessor = new CamelSipConsumerProcessor(endpoint) {
                     @Override
-                    public void start() throws Exception {
-                        _listener._providerProcessors.get(sipProvider).add(wrappingProcessor);
-                    }
+                    public void process(Exchange exchange) throws Exception {
+                        CamelSipMessage message = (CamelSipMessage) exchange.getIn();
+                        if (message.isRequest()) {
+                            Response response = _messageFactory.createResponse(_responseCode, message.getMessage());
+                            System.out.println("**********SEND RESP BY CODE UPON RECV*************\n" + response.toString());
+                            ((ServerTransaction) message.getTransaction()).sendResponse(response);
 
-                    @Override
-                    public void stop() throws Exception {
-                        _listener._providerProcessors.get(sipProvider).remove(wrappingProcessor);
-                    }
-
-                    @Override
-                    public Endpoint getEndpoint() {
-                        return endpoint;
+                        }
+                        processor.process(exchange);
                     }
                 };
-                return consumer;
-            } else {
-                return null;
             }
-
         }
 
         @Override
-        public boolean isSingleton() {
-            return true;
+        public void start() throws Exception {
+            _listener._providerProcessors.get(_sipProvider).add(_wrappingProcessor);
         }
+
+        @Override
+        public void stop() throws Exception {
+            _listener._providerProcessors.get(_sipProvider).remove(_wrappingProcessor);
+        }
+
+        @Override
+        public Endpoint getEndpoint() {
+            return _endpoint;
+        }
+
     }
 
     private abstract class CamelSipConsumerProcessor implements Processor {
@@ -405,37 +487,39 @@ public class SipComponent extends DefaultComponent {
 
     public class CamelSipMessage extends DefaultMessage {
 
-        private final EventObject _event;
         private final SipProvider _provider;
-        private final Dialog _dialog;
         private final Transaction _transaction;
-        private final Message _message;
-        private final boolean _isRequest;
 
         private CamelSipMessage(CamelContext camelContext, RequestEvent requestEvent) {
             super(camelContext);
-            _dialog = requestEvent.getDialog();
-            _transaction = requestEvent.getServerTransaction();
-            _event = requestEvent;
-            _message = requestEvent.getRequest();
-            _isRequest = true;
+            Request request = requestEvent.getRequest();
             _provider = (SipProvider) requestEvent.getSource();
-            setBody(_message);
+            ServerTransaction transaction = requestEvent.getServerTransaction();
+            if (transaction == null) {
+                try {
+                    _transaction = _provider.getNewServerTransaction(request);
+                } catch (TransactionAlreadyExistsException | TransactionUnavailableException e) {
+                    throw new RuntimeException(e);
+                }
+            } else {
+                _transaction = transaction;
+            }
+            super.setBody(request);
         }
 
         private CamelSipMessage(CamelContext camelContext, ResponseEvent responseEvent) {
             super(camelContext);
-            _dialog = responseEvent.getDialog();
-            _transaction = responseEvent.getClientTransaction();
-            _event = responseEvent;
-            _message = responseEvent.getResponse();
-            _isRequest = false;
             _provider = (SipProvider) responseEvent.getSource();
-            setBody(_message);
+            _transaction = responseEvent.getClientTransaction();
+            super.setBody(responseEvent.getResponse());
         }
 
         public boolean isRequest() {
-            return _isRequest;
+            return getBody() instanceof Request;
+        }
+
+        public boolean isResponse() {
+            return getBody() instanceof Response;
         }
 
         public SipProvider getProvider() {
@@ -443,26 +527,16 @@ public class SipComponent extends DefaultComponent {
         }
 
         public <T extends Message> T getMessage() {
-            return (T) _message;
-        }
-
-        @Override
-        public final void setBody(Object body) {
-            super.setBody(body); //To change body of generated methods, choose Tools | Templates.
+            return (T) getBody();
         }
 
         public Dialog getDialog() {
-            return _dialog;
+            return _transaction.getDialog();
         }
 
         public <T extends Transaction> T getTransaction() {
             return (T) _transaction;
         }
-
-        public <T extends EventObject> T getEvent() {
-            return (T) _event;
-        }
-
     }
 
     private class CamelSipListener implements SipListener {
