@@ -76,6 +76,8 @@ public class SipComponent extends DefaultComponent {
     private final SipFactory _sipFactory = SipFactory.getInstance();
     private final SipStack _sipStack;
     private final Map<String, SipProvider> _sipProvidersByPortAndTransport = new HashMap<>(3);
+    private final Map<ServerTransaction, Set<ClientTransaction>> _serverClients = new HashMap<>();
+    private final Map<ClientTransaction, ServerTransaction> _clientServer = new HashMap<>();
     private final CamelSipListener _listener = new CamelSipListener();
     private final String _ourHost;
     private final HeaderFactory _headerFactory;
@@ -285,7 +287,9 @@ public class SipComponent extends DefaultComponent {
                 ClientTransaction clientTransaction = receivingProvider.getNewClientTransaction(newRequest);
 
                 // remember the server transaction, to forward back the responses
-                clientTransaction.setApplicationData(serverTransaction);
+                //clientTransaction.setApplicationData(serverTransaction);
+                _clientServer.put(clientTransaction, serverTransaction);
+                _serverClients.get(serverTransaction).add(clientTransaction);
 
                 System.out.println("**********FWD REQ*************\n" + newRequest.toString());
                 clientTransaction.sendRequest();
@@ -335,28 +339,46 @@ public class SipComponent extends DefaultComponent {
                     serverTransaction.sendResponse(response);
                 }
 
-                RouteHeader routeHeader = (RouteHeader) request.getHeader(RouteHeader.NAME);
-                SipURI routeUri = (SipURI) routeHeader.getAddress().getURI();
-                ViaHeader viaHeader = _headerFactory.createViaHeader(_ourHost, routeUri.getPort(), routeUri.getTransportParam(), null);
+                // maybe it happens to be a known server transaction!
+                if (request.getMethod().equals("CANCEL")) {
+                    Set<ClientTransaction> clientTransactions = _serverClients.get(serverTransaction);
+                    if (clientTransactions != null && !clientTransactions.isEmpty()) {
+                        for (ClientTransaction clientTransaction : clientTransactions) {
+                            Request cancelRequest = clientTransaction.createCancel();
+                            ClientTransaction clientCancelTransaction = message.getProvider().getNewClientTransaction(cancelRequest);
+                            //clientTransaction.setApplicationData(serverTransaction);
+                            _clientServer.put(clientCancelTransaction, serverTransaction);
+                            _serverClients.get(serverTransaction).add(clientCancelTransaction);
+                            System.out.println("**********PROXYSEND CANCEL REQ*************\n" + cancelRequest.toString());
+                            clientCancelTransaction.sendRequest();
+                        }
+                    }
+                } else {
+                    RouteHeader routeHeader = (RouteHeader) request.getHeader(RouteHeader.NAME);
+                    SipURI routeUri = (SipURI) routeHeader.getAddress().getURI();
+                    ViaHeader viaHeader = _headerFactory.createViaHeader(_ourHost, routeUri.getPort(), routeUri.getTransportParam(), null);
 
-                SipURI recordRouteUri = _addressFactory.createSipURI(null, _ourHost);
-                Address recordRouteAddress = _addressFactory.createAddress(null, recordRouteUri);
-                recordRouteUri.setPort(routeUri.getPort());
-                recordRouteUri.setLrParam();
-                recordRouteUri.setTransportParam(routeUri.getTransportParam());
-                RecordRouteHeader recordRoute = _headerFactory.createRecordRouteHeader(recordRouteAddress);
+                    SipURI recordRouteUri = _addressFactory.createSipURI(null, _ourHost);
+                    Address recordRouteAddress = _addressFactory.createAddress(null, recordRouteUri);
+                    recordRouteUri.setPort(routeUri.getPort());
+                    recordRouteUri.setLrParam();
+                    recordRouteUri.setTransportParam(routeUri.getTransportParam());
+                    RecordRouteHeader recordRoute = _headerFactory.createRecordRouteHeader(recordRouteAddress);
 
-                // actual forwarding 
-                Request newRequest = (Request) request.clone();
-                newRequest.addFirst(viaHeader);
-                newRequest.addHeader(recordRoute);
+                    // actual forwarding 
+                    Request newRequest = (Request) request.clone();
+                    newRequest.addFirst(viaHeader);
+                    newRequest.addHeader(recordRoute);
 
-                ClientTransaction clientTransaction = message.getProvider().getNewClientTransaction(newRequest);
-                clientTransaction.setApplicationData(serverTransaction);
+                    ClientTransaction clientTransaction = message.getProvider().getNewClientTransaction(newRequest);
+                    //clientTransaction.setApplicationData(serverTransaction);
+                    _clientServer.put(clientTransaction, serverTransaction);
+                    _serverClients.get(serverTransaction).add(clientTransaction);
 
-                // will use the transport specified in route header to send
-                System.out.println("**********PROXYSEND REQ*************\n" + newRequest.toString());
-                clientTransaction.sendRequest();
+                    // will use the transport specified in route header to send
+                    System.out.println("**********PROXYSEND REQ*************\n" + newRequest.toString());
+                    clientTransaction.sendRequest();
+                }
             } else {
                 // it is a response to our previously forwarded request
                 Response response = message.getMessage();
@@ -373,7 +395,8 @@ public class SipComponent extends DefaultComponent {
                     System.out.println("**********PROXYSEND RESP NONTRAN*******\n\n\n");
                     sender.sendResponse(newResponse);
                 } else {
-                    ServerTransaction serverTransaction = (ServerTransaction) clientTransaction.getApplicationData();
+                    //ServerTransaction serverTransaction = (ServerTransaction) clientTransaction.getApplicationData();
+                    ServerTransaction serverTransaction = _clientServer.get(clientTransaction);
                     System.out.println("**********PROXYSEND RESP TRAN***********\n" + newResponse.toString());
                     serverTransaction.sendResponse(newResponse);
                 }
@@ -497,13 +520,14 @@ public class SipComponent extends DefaultComponent {
             ServerTransaction transaction = requestEvent.getServerTransaction();
             if (transaction == null) {
                 try {
-                    _transaction = _provider.getNewServerTransaction(request);
+                    transaction = _provider.getNewServerTransaction(request);
                 } catch (TransactionAlreadyExistsException | TransactionUnavailableException e) {
                     throw new RuntimeException(e);
                 }
-            } else {
-                _transaction = transaction;
             }
+            _transaction = transaction;
+            _serverClients.put(transaction, new HashSet<>(5));
+
             super.setBody(request);
         }
 
@@ -570,8 +594,17 @@ public class SipComponent extends DefaultComponent {
         }
 
         @Override
-        public void processTransactionTerminated(TransactionTerminatedEvent transactionTerminatedEvent) {
-
+        public void processTransactionTerminated(
+                TransactionTerminatedEvent transactionTerminatedEvent) {
+            if (transactionTerminatedEvent.isServerTransaction()) {
+                ServerTransaction serverTransaction = transactionTerminatedEvent.getServerTransaction();
+                Set<ClientTransaction> removed = _serverClients.remove(serverTransaction);
+                _clientServer.keySet().removeAll(removed);
+            } else {
+                ClientTransaction clientTransaction = transactionTerminatedEvent.getClientTransaction();
+                ServerTransaction serverTransaction = _clientServer.remove(clientTransaction);
+                _serverClients.remove(serverTransaction);
+            }
         }
 
         @Override
