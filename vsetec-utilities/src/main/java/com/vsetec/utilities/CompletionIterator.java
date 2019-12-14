@@ -21,7 +21,6 @@ import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  *
@@ -31,8 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class CompletionIterator<T> implements Iterable<T> {
 
-    private final AtomicInteger _count = new AtomicInteger(0);
-
+    private int _count = 0;
     private final CompletionService<T> _completer;
 
     public CompletionIterator(ExecutorService executor) {
@@ -41,25 +39,29 @@ public class CompletionIterator<T> implements Iterable<T> {
 
     public void submit(Callable<T> task) {
         _completer.submit(task);
-        _count.incrementAndGet();
+        _count++;
     }
 
     @Override
     public Iterator<T> iterator() {
         return new Iterator<T>() {
+
             @Override
             public boolean hasNext() {
-                return _count.decrementAndGet() > 0;
+                return _count > 0;
             }
 
             @Override
             public T next() {
                 try {
-                    return _completer.take().get();
+                    T ret = _completer.take().get();
+                    _count--;
+                    return ret;
                 } catch (InterruptedException | ExecutionException e) {
                     throw new RuntimeException(e);
                 }
             }
+
         };
     }
 
