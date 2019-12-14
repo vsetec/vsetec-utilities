@@ -15,10 +15,13 @@
  */
 package com.vsetec.utilities.camel;
 
+import gov.nist.javax.sip.header.Via;
 import gov.nist.javax.sip.stack.NioMessageProcessorFactory;
 import java.net.URISyntaxException;
+import java.text.ParseException;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -43,6 +46,7 @@ import javax.sip.Transaction;
 import javax.sip.TransactionAlreadyExistsException;
 import javax.sip.TransactionTerminatedEvent;
 import javax.sip.TransactionUnavailableException;
+import javax.sip.TransportAlreadySupportedException;
 import javax.sip.TransportNotSupportedException;
 import javax.sip.address.Address;
 import javax.sip.address.AddressFactory;
@@ -424,7 +428,21 @@ public class SipComponent extends DefaultComponent {
             if (ret == null) {
                 try {
                     ListeningPoint lp = _sipStack.createListeningPoint(_ourHost, listeningPort, transport);
-                    ret = _sipStack.createSipProvider(lp);
+                    
+                    Iterator sps = _sipStack.getSipProviders();
+                    while(sps.hasNext()){
+                        SipProvider tmpSp = (SipProvider) sps.next();
+                        try{
+                            tmpSp.addListeningPoint(lp);
+                            ret = tmpSp;
+                            break;
+                        }catch(TransportAlreadySupportedException e){
+                            
+                        }
+                    }
+                    if(ret==null){
+                        ret = _sipStack.createSipProvider(lp);
+                    }
                     _sipProvidersByPortAndTransport.put(key, ret);
                     ret.addSipListener(_listener);
                     _listener._providerProcessors.put(ret, new HashSet(4));
@@ -528,6 +546,12 @@ public class SipComponent extends DefaultComponent {
             _transaction = transaction;
             _serverClients.put(transaction, new HashSet<>(5));
 
+            try{
+                ((ViaHeader)request.getHeader(Via.NAME)).setReceived(_ourHost);
+            }catch(ParseException e){
+                throw new RuntimeException(e);
+            }
+            
             super.setBody(request);
         }
 
