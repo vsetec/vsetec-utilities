@@ -21,6 +21,7 @@ import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -67,6 +68,14 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
     public synchronized Map<K, V> last() {
         return _maps.get(_maps.size() - 1);
+    }
+
+    public synchronized void detach(int index) {
+        _maps.add(index, new HiddenMap(new HashMap<>(_maps.get(index))));
+    }
+
+    public synchronized void detachLast() {
+        detach(_maps.size() - 1);
     }
 
     @Override
