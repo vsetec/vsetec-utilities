@@ -17,7 +17,6 @@ package com.vsetec.utilities;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
-import java.io.ByteArrayInputStream;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -95,6 +94,10 @@ public class ParallelStream extends InputStream {
 
     public int getSequenceNumber() {
         return _myNumber;
+    }
+
+    public InputStream getSource() {
+        return _provider._inputStream;
     }
 
     private class Provider {
