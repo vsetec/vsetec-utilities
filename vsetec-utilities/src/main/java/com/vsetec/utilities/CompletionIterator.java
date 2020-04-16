@@ -21,6 +21,8 @@ import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  *
@@ -32,9 +34,16 @@ public class CompletionIterator<T> implements Iterable<T> {
 
     private int _count = 0;
     private final CompletionService<T> _completer;
+    private final long _timeout;
 
     public CompletionIterator(ExecutorService executor) {
         this._completer = new ExecutorCompletionService<>(executor);
+        _timeout = Long.MAX_VALUE;
+    }
+
+    public CompletionIterator(ExecutorService executor, long timeout) {
+        this._completer = new ExecutorCompletionService<>(executor);
+        _timeout = timeout;
     }
 
     public void submit(Callable<T> task) {
@@ -44,25 +53,56 @@ public class CompletionIterator<T> implements Iterable<T> {
 
     @Override
     public Iterator<T> iterator() {
-        return new Iterator<T>() {
 
-            @Override
-            public boolean hasNext() {
-                return _count > 0;
-            }
+        if (_timeout == Long.MAX_VALUE) {
 
-            @Override
-            public T next() {
-                try {
-                    T ret = _completer.take().get();
-                    _count--;
-                    return ret;
-                } catch (InterruptedException | ExecutionException e) {
-                    throw new RuntimeException(e);
+            return new Iterator<T>() {
+
+                @Override
+                public boolean hasNext() {
+                    return _count > 0;
                 }
-            }
 
-        };
+                @Override
+                public T next() {
+                    try {
+                        T ret = _completer.take().get();
+                        _count--;
+                        return ret;
+                    } catch (InterruptedException | ExecutionException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+
+            };
+
+        } else {
+
+            return new Iterator<T>() {
+
+                @Override
+                public boolean hasNext() {
+                    return _count > 0;
+                }
+
+                @Override
+                public T next() {
+                    try {
+                        T ret = _completer.take().get(_timeout, TimeUnit.MILLISECONDS);
+                        _count--;
+                        return ret;
+                    } catch (InterruptedException | ExecutionException e) {
+                        throw new RuntimeException(e);
+                    } catch (TimeoutException e) {
+                        _count--;
+                        return null;
+                    }
+                }
+
+            };
+
+        }
+
     }
 
 }
