@@ -55,6 +55,10 @@ public class Formatter {
         _resBnd = formatter._resBnd;
     }
 
+    public Formatter() {
+        this._resBnd = null;
+    }
+
     public Formatter(Map<Locale, ResourceBundle[]> resourceBundles) {
         try {
             _resBnd = resourceBundles;
@@ -228,6 +232,9 @@ public class Formatter {
     }
 
     public String label(String label, Locale locale, String def) {
+        if (_resBnd == null) {
+            return def;
+        }
         ResourceBundle[] bs = _resBnd.get(locale);
         for (ResourceBundle b : bs) {
             if (b.containsKey(label)) {
