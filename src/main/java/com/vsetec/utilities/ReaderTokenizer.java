@@ -26,19 +26,42 @@ import java.util.NoSuchElementException;
  */
 public class ReaderTokenizer {
 
+    private final String _delimiter;
+    private final int _repeatFirstLines;
+
+    public ReaderTokenizer(String delimiter, int repeatFirstLines) {
+        this._delimiter = delimiter;
+        this._repeatFirstLines = repeatFirstLines;
+    }
+
+    public ReaderTokenizer(String delimiter) {
+        this._delimiter = delimiter;
+        this._repeatFirstLines = 0;
+    }
+
+    public ReaderTokenizer(int repeatFirstLines) {
+        this._delimiter = "\n";
+        this._repeatFirstLines = repeatFirstLines;
+    }
+
+    public ReaderTokenizer() {
+        this._delimiter = "\n";
+        this._repeatFirstLines = 0;
+    }
+
     public Iterator<String> tokenize(final Reader reader) throws IOException {
-        return new TokenIterator(reader, "\n");
+        return tokenizeWithHeaderAndDelimiter(reader, _delimiter, _repeatFirstLines);
     }
 
-    public Iterator<String> tokenize(final Reader reader, String delimiter) throws IOException {
-        return new TokenIterator(reader, delimiter);
+    public Iterator<String> tokenizeWithDelimiter(final Reader reader, String delimiter) throws IOException {
+        return tokenizeWithHeaderAndDelimiter(reader, delimiter, _repeatFirstLines);
     }
 
-    public Iterator<String> tokenize(final Reader reader, int headerTokenNumber) throws IOException {
-        return tokenize(reader, "\n", headerTokenNumber);
+    public Iterator<String> tokenizeWithHeader(final Reader reader, int headerTokenNumber) throws IOException {
+        return tokenizeWithHeaderAndDelimiter(reader, _delimiter, headerTokenNumber);
     }
 
-    public Iterator<String> tokenize(final Reader reader, String delimiter, int headerTokenNumber) throws IOException {
+    public Iterator<String> tokenizeWithHeaderAndDelimiter(final Reader reader, String delimiter, int headerTokenNumber) throws IOException {
 
         Iterator<String> ret = new TokenIterator(reader, delimiter) {
 
