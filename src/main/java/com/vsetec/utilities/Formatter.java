@@ -30,7 +30,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.ResourceBundle;
 import java.util.TimeZone;
 import java.util.TreeMap;
 import org.apache.commons.text.StringEscapeUtils;
@@ -49,20 +48,10 @@ public class Formatter {
         }
     };
     private final TreeMap<Integer, Map<String, List<TimeZone>>> _offsetCountryTimezone = new TreeMap<>();
-    private final Map<Locale, ResourceBundle[]> _resBnd;
-
-    protected Formatter(Formatter formatter) {
-        _resBnd = formatter._resBnd;
-    }
+    private final Map<String, TreeMap<String, String>> _labels = new HashMap<>(); // label code - locale - label text
 
     public Formatter() {
-        this._resBnd = null;
-    }
-
-    public Formatter(Map<Locale, ResourceBundle[]> resourceBundles) {
         try {
-            _resBnd = resourceBundles;
-
             // TODO: make it reload periodically, like once a half hour, in a separate thread? synchronze?
             long today = System.currentTimeMillis();
             BufferedReader reader = new BufferedReader(new InputStreamReader(Formatter.class.getResourceAsStream("zone1970.tab"), "UTF-8"));
@@ -223,6 +212,21 @@ public class Formatter {
         return format;
     }
 
+    public void addLabels(String locale, Map<String, String> labels) {
+        addLabels(Locale.forLanguageTag(locale), labels);
+    }
+
+    public synchronized void addLabels(Locale locale, Map<String, String> labels) {
+        for (Map.Entry<String, String> entry : labels.entrySet()) {
+            TreeMap<String, String> variantsForLabelCode = _labels.get(entry.getKey());
+            if (variantsForLabelCode == null) {
+                variantsForLabelCode = new TreeMap<>();
+                _labels.put(entry.getKey(), variantsForLabelCode);
+            }
+            variantsForLabelCode.put(locale.toLanguageTag(), entry.getValue());
+        }
+    }
+
     public String label(String label) {
         return label(label, null, null);
     }
@@ -232,19 +236,26 @@ public class Formatter {
     }
 
     public String label(String label, Locale locale, String def) {
-        if (_resBnd == null) {
+
+        if (locale == null) {
             return def;
         }
-        ResourceBundle[] bs = _resBnd.get(locale);
-        for (ResourceBundle b : bs) {
-            if (b.containsKey(label)) {
-                return b.getString(label);
-            }
-        }
-        if (def != null) {
+
+        TreeMap<String, String> variantsForLabelCode = _labels.get(label);
+        if (variantsForLabelCode == null) {
             return def;
         }
-        return label;
+        String wantedLocaleTag = locale.toLanguageTag();
+        Map.Entry<String, String> foundLocaleTagEntry = variantsForLabelCode.floorEntry(wantedLocaleTag);
+        Locale foundLocale = Locale.forLanguageTag(foundLocaleTagEntry.getKey());
+
+        if (!foundLocale.getLanguage().equals(locale.getLanguage())) {
+            // this is totally different language
+            return def;
+        } else {
+            return foundLocaleTagEntry.getValue();
+        }
+
     }
 
     public String noHtml(String text) {
