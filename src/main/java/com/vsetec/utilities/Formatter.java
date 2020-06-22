@@ -238,7 +238,7 @@ public class Formatter {
     public String label(String label, Locale locale, String def) {
 
         if (locale == null) {
-            return def;
+            locale = Locale.getDefault();
         }
 
         TreeMap<String, String> variantsForLabelCode = _labels.get(label);
