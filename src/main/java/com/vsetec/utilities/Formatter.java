@@ -25,11 +25,14 @@ import java.text.Format;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TimeZone;
 import java.util.TreeMap;
 import org.apache.commons.text.StringEscapeUtils;
@@ -49,6 +52,7 @@ public class Formatter {
     };
     private final TreeMap<Integer, Map<String, List<TimeZone>>> _offsetCountryTimezone = new TreeMap<>();
     private final Map<String, TreeMap<String, String>> _labels = new HashMap<>(); // label code - locale - label text
+    private final Set<Locale> _labelLocales = new HashSet<>();
 
     public Formatter() {
         try {
@@ -217,6 +221,7 @@ public class Formatter {
     }
 
     public synchronized void addLabels(Locale locale, Map<String, String> labels) {
+        _labelLocales.add(locale);
         for (Map.Entry<String, String> entry : labels.entrySet()) {
             TreeMap<String, String> variantsForLabelCode = _labels.get(entry.getKey());
             if (variantsForLabelCode == null) {
@@ -225,6 +230,10 @@ public class Formatter {
             }
             variantsForLabelCode.put(locale.toLanguageTag(), entry.getValue());
         }
+    }
+
+    public Collection<Locale> getLabelLocales() {
+        return _labelLocales;
     }
 
     public String label(String label) {
