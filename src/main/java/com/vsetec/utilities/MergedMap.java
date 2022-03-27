@@ -71,7 +71,7 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
     }
 
     public synchronized void detach(int index) {
-        _maps.add(index, new HiddenMap(new HashMap<>(_maps.get(index))));
+        _maps.set(index, new HiddenMap(new HashMap<>(_maps.get(index))));
     }
 
     public synchronized void detachLast() {
