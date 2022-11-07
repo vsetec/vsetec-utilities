@@ -24,6 +24,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
+import java.util.HashMap;
+import java.util.HashSet;
 
 /**
  *
@@ -31,69 +33,52 @@ import java.io.UnsupportedEncodingException;
  */
 public class ParallelStream extends InputStream {
 
-    //TODO: probably rewrite with a dedicated provider thread
+    private static final HashMap<InputStream, Provider> _providers = new HashMap<>();
+
     private final Provider _provider;
-    private int _myNumber;
-    private boolean _askedForNext = false;
     private boolean _isClosed = false;
-    private final byte[] _buffer = new byte[50];
-    private int _bufferEnd = -1;
     private int _curPos = 0;
 
     public ParallelStream(InputStream parentStream) {
         if (parentStream instanceof ParallelStream) {
             _provider = ((ParallelStream) parentStream)._provider;
-            synchronized (_provider) {
-                _provider._attachAndGetYourNumber(this);
-            }
         } else {
-            _provider = new Provider(parentStream);
-            _provider._attachAndGetYourNumber(this);
+            synchronized (_providers) {
+                Provider provider = _providers.get(parentStream);
+                if (provider != null) {
+                    _provider = provider;
+                } else {
+                    _provider = new Provider(parentStream);
+                    _providers.put(parentStream, provider);
+                }
+            }
         }
+        _provider._attach(this);
     }
 
     @Override
     public int read() throws IOException {
-        if (_curPos < _bufferEnd) {
-            int ret = Byte.toUnsignedInt(_buffer[_curPos]);
+        if (_curPos < _provider._bufferEnd) {
+            int ret = Byte.toUnsignedInt(_provider._buffer[_curPos]);
             _curPos++;
             return ret;
         }
 
-        synchronized (this) {
-            _askedForNext = true;
-            if (_myNumber == 0) {
-                _provider._loadNext();
-            } else {
-                notify();
-            }
-            while (_askedForNext) {
-                try {
-                    wait(1000);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException("Unexpected interruption", e);
-                }
-            }
-            if (_bufferEnd < 0) {
-                return -1;
-            } else {
-                int ret = Byte.toUnsignedInt(_buffer[0]);
-                _curPos = 1;
-                return ret;
-            }
+        _provider._loadNext();
+
+        if (_provider._bufferEnd < 0) {
+            return -1;
         }
+        _curPos = 1;
+        return Byte.toUnsignedInt(_provider._buffer[0]);
     }
 
     @Override
     public void close() throws IOException {
         if (!_isClosed) {
-            _provider._detachAndClose(this);
             _isClosed = true;
+            _provider._detachAndClose(this);
         }
-    }
-
-    public int getSequenceNumber() {
-        return _myNumber;
     }
 
     public InputStream getSource() {
@@ -103,72 +88,63 @@ public class ParallelStream extends InputStream {
     private class Provider {
 
         private final InputStream _inputStream;
-        private ParallelStream[] _readers = new ParallelStream[0];
-        private final byte[] _bufferP = new byte[50];
-        private int _bufferEndP = -1;
+        private final HashSet<ParallelStream> _readers = new HashSet<>(4);
+        private final byte[] _buffer = new byte[50];
+        private int _bufferEnd = -1;
+        private int _howManyHaveAsked = 0;
+        private int _stuck = 0;
 
         private Provider(InputStream inputStream) {
             _inputStream = inputStream;
         }
 
         private synchronized void _loadNext() throws IOException {
-            _bufferEndP = _inputStream.read(_bufferP);
-
-            for (ParallelStream sibling : _readers) {
-                synchronized (sibling) {
-                    while (!sibling._askedForNext) {
-                        try {
-                            sibling.wait(1000);
-                        } catch (InterruptedException e) {
-                            throw new RuntimeException("Unexpected interruption", e);
-                        }
-                    }
-                    sibling._askedForNext = false;
-                    sibling._bufferEnd = _bufferEndP;
-                    if (_bufferEndP >= 0) {
-                        System.arraycopy(_bufferP, 0, sibling._buffer, 0, _bufferEndP);
-                    }
-                    sibling.notify();
+            //TODO: too slow. rework!
+            while (_stuck > 0 && _howManyHaveAsked == 0) {
+                try {
+                    wait();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
                 }
             }
-            // all asked
+
+            _howManyHaveAsked++;
+            _stuck++;
+
+            while (_howManyHaveAsked < _readers.size()) {
+                try {
+                    wait();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                if (_howManyHaveAsked == 0) {
+                    _stuck--;
+                    if (_stuck <= 0) {
+                        notifyAll();
+                    }
+                    return;
+                }
+            }
+
+            _howManyHaveAsked = 0;
+            _stuck--;
+            _bufferEnd = _inputStream.read(_buffer);
+            notifyAll();
+
         }
 
         private synchronized void _detachAndClose(ParallelStream whosClosing) throws IOException {
-            // TODO: check if it's safe to detach one of the readers while others are working. What if another reader becomes first thus acquiring a special position
-            synchronized (whosClosing) {
-                synchronized (_readers[0]) {
-                    int ret = _readers.length;
-                    int nextGood = whosClosing._myNumber + 1;
-
-                    ParallelStream[] newReaderList = new ParallelStream[ret - 1];
-                    System.arraycopy(_readers, 0, newReaderList, 0, whosClosing._myNumber);
-                    if (nextGood < _readers.length) {
-                        System.arraycopy(_readers, nextGood, newReaderList, whosClosing._myNumber, newReaderList.length - whosClosing._myNumber);
-                    }
-                    _readers = newReaderList;
-
-                    if (newReaderList.length == 0) {
-                        _inputStream.close();
-                    } else {
-                        for (int i = 0; i < newReaderList.length; i++) {
-                            newReaderList[i]._myNumber = i;
-                        }
-                    }
-                    notifyAll();
-                }
+            _readers.remove(whosClosing);
+            notifyAll();
+            if (_readers.isEmpty()) {
+                _inputStream.close();
+                _providers.remove(_inputStream);
             }
         }
 
-        private synchronized void _attachAndGetYourNumber(ParallelStream ms) {
-            int ret = _readers.length;
-
-            ParallelStream[] newReaderList = new ParallelStream[ret + 1];
-            System.arraycopy(_readers, 0, newReaderList, 0, ret);
-            newReaderList[ret] = ms;
-            _readers = newReaderList;
-
-            ms._myNumber = ret;
+        private synchronized void _attach(ParallelStream ms) {
+            _readers.add(ms);
+            notifyAll();
         }
 
     }
@@ -187,7 +163,7 @@ public class ParallelStream extends InputStream {
      * @throws FileNotFoundException
      */
     public static void main(String[] arguments) throws UnsupportedEncodingException, FileNotFoundException {
-        InputStream is = new BufferedInputStream(new FileInputStream("/home/fedd/Videos/stgal.mp4"));
+        InputStream is = new BufferedInputStream(new FileInputStream("/home/fedd/Videos/DASH_720.mp4"));
         //InputStream is = new ByteArrayInputStream("A quick brown fox jumped over a lazy dog\n".getBytes("UTF-8"));
 
         OutputStream fos1 = new BufferedOutputStream(new FileOutputStream("testfile1.mp4", true));
@@ -219,6 +195,9 @@ public class ParallelStream extends InputStream {
             @Override
             public void run() {
                 try {
+
+                    Thread.sleep(3000);
+
                     int byt;
                     while ((byt = ms3.read()) != -1) {
                         fos3.write(byt);
