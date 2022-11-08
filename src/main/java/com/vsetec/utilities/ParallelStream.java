@@ -39,6 +39,7 @@ public class ParallelStream extends InputStream {
     private final Provider _provider;
     private boolean _isClosed = false;
     private int _curPos = 0;
+    private byte[] _buffer = new byte[0];
 
     public ParallelStream(InputStream parentStream) {
         synchronized (_providers) {
@@ -59,19 +60,19 @@ public class ParallelStream extends InputStream {
 
     @Override
     public int read() throws IOException {
-        if (_curPos < _provider._bufferEnd) {
-            int ret = Byte.toUnsignedInt(_provider._buffer[_curPos]);
+        if (_curPos < _buffer.length) {
+            int ret = Byte.toUnsignedInt(_buffer[_curPos]);
             _curPos++;
             return ret;
         }
 
-        _provider._loadNext();
+        _buffer = _provider._loadNext();
 
-        if (_provider._bufferEnd < 0) {
+        if (_buffer == null) {
             return -1;
         }
         _curPos = 1;
-        return Byte.toUnsignedInt(_provider._buffer[0]);
+        return Byte.toUnsignedInt(_buffer[0]);
     }
 
     @Override
@@ -88,25 +89,26 @@ public class ParallelStream extends InputStream {
 
     private static class Provider {
 
+        private int _chunkSize = 50;
         private final InputStream _inputStream;
         private final HashSet<ParallelStream> _readers = new HashSet<>(4);
-        private final byte[] _buffer = new byte[CHUNKSIZE];
-        private int _bufferEnd = -1;
+        private byte[] _bufferTmp = new byte[_chunkSize];
         private Object _lock = new Object();
+        private byte[][] _bufferHolder = new byte[1][];
         private int _howManyHaveAsked = 0;
-        //private int _stuck = 0;
 
         private Provider(InputStream inputStream) {
             _inputStream = inputStream;
         }
 
-        private void _loadNext() throws IOException {
+        private byte[] _loadNext() throws IOException {
 
             final Object lock = _lock; // TODO: potential loophole when adding/removing readers while reading
             synchronized (lock) {
 
                 _howManyHaveAsked++;
 
+                long waitTime = System.currentTimeMillis();
                 while (_howManyHaveAsked < _readers.size()) {
                     try {
                         lock.wait(1000);
@@ -114,14 +116,39 @@ public class ParallelStream extends InputStream {
                         throw new RuntimeException(e);
                     }
                     if (lock != _lock) { // switched to next
-                        return;
+                        return _bufferHolder[0];
                     }
                 }
 
                 _howManyHaveAsked = 0;
-                _bufferEnd = _inputStream.read(_buffer);
-                lock.notifyAll();
                 _lock = new Object();
+
+                int size = _inputStream.read(_bufferTmp);
+                if (size == -1) {
+
+                    _bufferHolder[0] = null;
+
+                } else {
+                    _bufferHolder[0] = new byte[size];
+                    System.arraycopy(_bufferTmp, 0, _bufferHolder[0], 0, size);
+
+                    // compute chunk size
+                    waitTime = System.currentTimeMillis() - waitTime;
+                    boolean resize = false;
+                    if (waitTime > 100 && _chunkSize > 50) {
+                        _chunkSize = (int) (_chunkSize * 0.7);
+                        resize = true;
+                    } else if (size == _chunkSize) {
+                        _chunkSize = (int) (_chunkSize * 1.5);
+                        resize = true;
+                    }
+                    if (resize) {
+                        _bufferTmp = new byte[_chunkSize];
+                    }
+                }
+
+                lock.notifyAll();
+                return _bufferHolder[0];
 
             }
 
@@ -152,25 +179,21 @@ public class ParallelStream extends InputStream {
     /**
      * A quick test. Creates several identical files.
      *
-     * plain copy - 20.000.000 bytes per second
-     *
-     * 2,3 files - 2 - 2.500.000 bytes per second
-     *
-     * 1 file - 25.000.000 bytes per second
+     * 4 files - 15-20 Megabytes per second
      *
      * @param arguments
      * @throws UnsupportedEncodingException
      * @throws FileNotFoundException
      */
     public static void main(String[] arguments) throws UnsupportedEncodingException, FileNotFoundException {
-        InputStream is = new BufferedInputStream(new FileInputStream("/home/fedd/Videos/Ivan.Vasilyevich.1973.720p.mkv"));
+        InputStream is = new BufferedInputStream(new FileInputStream("test.ts"));
         //InputStream is = new ByteArrayInputStream("A quick brown fox jumped over a lazy dog\n".getBytes("UTF-8"));
 
         int number = 4; // no less than 3 to test
         OutputStream[] fos = new OutputStream[number];
         InputStream[] ms = new ParallelStream[number];
         for (int i = 0; i < number; i++) {
-            fos[i] = new BufferedOutputStream(new FileOutputStream("testfile" + i + ".mkv", true));
+            fos[i] = new BufferedOutputStream(new FileOutputStream("testfile" + i, true));
             ms[i] = new ParallelStream(is);
         }
 
@@ -221,15 +244,21 @@ public class ParallelStream extends InputStream {
         try {
             int byt;
             int i = 0;
+            int j = 0;
+            long tot = 0;
             long time = System.currentTimeMillis();
             while ((byt = ms[0].read()) != -1) {
                 fos[0].write(byt);
                 i++;
-                if (i > 100000) {
+                if (i > 1048576) {
                     i = 0;
                     long took = System.currentTimeMillis() - time;
                     time = System.currentTimeMillis();
-                    System.out.println("100000 bytes took " + took + " milliseconds which means " + (100000000 / took) + " bytes per second");
+                    long kb = 1048576000 / took / 1024;
+                    tot = tot + kb;
+                    j++;
+
+                    System.out.println("1MB took " + took + " ms which means " + kb + " KB/s. Avg - " + (tot / j) + "KB/s");
                 }
             }
             fos[0].close();
