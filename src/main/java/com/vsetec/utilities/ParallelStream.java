@@ -34,26 +34,27 @@ import java.util.HashSet;
 public class ParallelStream extends InputStream {
 
     private static final HashMap<InputStream, Provider> _providers = new HashMap<>();
+    private static final int CHUNKSIZE = 50;
 
     private final Provider _provider;
     private boolean _isClosed = false;
     private int _curPos = 0;
 
     public ParallelStream(InputStream parentStream) {
-        if (parentStream instanceof ParallelStream) {
-            _provider = ((ParallelStream) parentStream)._provider;
-        } else {
-            synchronized (_providers) {
+        synchronized (_providers) {
+            if (parentStream instanceof ParallelStream) {
+                _provider = ((ParallelStream) parentStream)._provider;
+            } else {
                 Provider provider = _providers.get(parentStream);
                 if (provider != null) {
                     _provider = provider;
                 } else {
                     _provider = new Provider(parentStream);
-                    _providers.put(parentStream, provider);
+                    _providers.put(parentStream, _provider);
                 }
             }
+            _provider._attach(this);
         }
-        _provider._attach(this);
     }
 
     @Override
@@ -85,66 +86,65 @@ public class ParallelStream extends InputStream {
         return _provider._inputStream;
     }
 
-    private class Provider {
+    private static class Provider {
 
         private final InputStream _inputStream;
         private final HashSet<ParallelStream> _readers = new HashSet<>(4);
-        private final byte[] _buffer = new byte[50];
+        private final byte[] _buffer = new byte[CHUNKSIZE];
         private int _bufferEnd = -1;
+        private Object _lock = new Object();
         private int _howManyHaveAsked = 0;
-        private int _stuck = 0;
+        //private int _stuck = 0;
 
         private Provider(InputStream inputStream) {
             _inputStream = inputStream;
         }
 
-        private synchronized void _loadNext() throws IOException {
-            //TODO: too slow. rework!
-            while (_stuck > 0 && _howManyHaveAsked == 0) {
-                try {
-                    wait();
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-            }
+        private void _loadNext() throws IOException {
 
-            _howManyHaveAsked++;
-            _stuck++;
+            final Object lock = _lock; // TODO: potential loophole when adding/removing readers while reading
+            synchronized (lock) {
 
-            while (_howManyHaveAsked < _readers.size()) {
-                try {
-                    wait();
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-                if (_howManyHaveAsked == 0) {
-                    _stuck--;
-                    if (_stuck <= 0) {
-                        notifyAll();
+                _howManyHaveAsked++;
+
+                while (_howManyHaveAsked < _readers.size()) {
+                    try {
+                        lock.wait(1000);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
                     }
-                    return;
+                    if (lock != _lock) { // switched to next
+                        return;
+                    }
+                }
+
+                _howManyHaveAsked = 0;
+                _bufferEnd = _inputStream.read(_buffer);
+                lock.notifyAll();
+                _lock = new Object();
+
+            }
+
+        }
+
+        private void _detachAndClose(ParallelStream par) throws IOException {
+            synchronized (_providers) {
+                synchronized (_lock) {
+                    _readers.remove(par);
+                    _lock.notifyAll();
+                    if (_readers.isEmpty()) {
+                        _inputStream.close();
+                        _providers.remove(_inputStream);
+                    }
                 }
             }
-
-            _howManyHaveAsked = 0;
-            _stuck--;
-            _bufferEnd = _inputStream.read(_buffer);
-            notifyAll();
-
         }
 
-        private synchronized void _detachAndClose(ParallelStream whosClosing) throws IOException {
-            _readers.remove(whosClosing);
-            notifyAll();
-            if (_readers.isEmpty()) {
-                _inputStream.close();
-                _providers.remove(_inputStream);
+        private void _attach(ParallelStream par) {
+            synchronized (_lock) {
+                _readers.add(par);
+                _lock.notifyAll();
             }
-        }
-
-        private synchronized void _attach(ParallelStream ms) {
-            _readers.add(ms);
-            notifyAll();
         }
 
     }
@@ -154,7 +154,7 @@ public class ParallelStream extends InputStream {
      *
      * plain copy - 20.000.000 bytes per second
      *
-     * 2,3 files - 2 - 5.000.000 bytes per second
+     * 2,3 files - 2 - 2.500.000 bytes per second
      *
      * 1 file - 25.000.000 bytes per second
      *
@@ -163,60 +163,67 @@ public class ParallelStream extends InputStream {
      * @throws FileNotFoundException
      */
     public static void main(String[] arguments) throws UnsupportedEncodingException, FileNotFoundException {
-        InputStream is = new BufferedInputStream(new FileInputStream("/home/fedd/Videos/DASH_720.mp4"));
+        InputStream is = new BufferedInputStream(new FileInputStream("/home/fedd/Videos/Ivan.Vasilyevich.1973.720p.mkv"));
         //InputStream is = new ByteArrayInputStream("A quick brown fox jumped over a lazy dog\n".getBytes("UTF-8"));
 
-        OutputStream fos1 = new BufferedOutputStream(new FileOutputStream("testfile1.mp4", true));
-        OutputStream fos2 = new BufferedOutputStream(new FileOutputStream("testfile2.mp4", true));
-        OutputStream fos3 = new BufferedOutputStream(new FileOutputStream("testfile3.mp4", true));
+        int number = 4; // no less than 3 to test
+        OutputStream[] fos = new OutputStream[number];
+        InputStream[] ms = new ParallelStream[number];
+        for (int i = 0; i < number; i++) {
+            fos[i] = new BufferedOutputStream(new FileOutputStream("testfile" + i + ".mkv", true));
+            ms[i] = new ParallelStream(is);
+        }
 
-        InputStream ms1 = new ParallelStream(is);
-        InputStream ms2 = new ParallelStream(ms1);
-        InputStream ms3 = new ParallelStream(ms2);
+        for (int i = 2; i < number; i++) {
+            final int y = i;
+            Thread thread = new Thread(new Runnable() {
+                final int ii = y;
 
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    int byt;
-                    while ((byt = ms1.read()) != -1) {
-                        fos1.write(byt);
+                @Override
+                public void run() {
+                    try {
+                        int byt;
+                        while ((byt = ms[ii].read()) != -1) {
+                            fos[ii].write(byt);
+                        }
+                        fos[ii].close();
+                        ms[ii].close();
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
                     }
-                    fos1.close();
-                    ms1.close();
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
                 }
-            }
-        }, "ParallelStream test");
-        thread.start();
+            }, "ParallelStream test " + i);
+            thread.start();
+        }
 
-        thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
+        if (number >= 2) {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
 
-                    Thread.sleep(3000);
+                        Thread.sleep(3000);
 
-                    int byt;
-                    while ((byt = ms3.read()) != -1) {
-                        fos3.write(byt);
+                        int byt;
+                        while ((byt = ms[1].read()) != -1) {
+                            fos[1].write(byt);
+                        }
+                        fos[1].close();
+                        ms[1].close();
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
                     }
-                    fos3.close();
-                    ms3.close();
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
                 }
-            }
-        }, "ParallelStream test 3");
-        thread.start();
+            }, "ParallelStream test 1 with delay");
+            thread.start();
+        }
 
         try {
             int byt;
             int i = 0;
             long time = System.currentTimeMillis();
-            while ((byt = ms2.read()) != -1) {
-                fos2.write(byt);
+            while ((byt = ms[0].read()) != -1) {
+                fos[0].write(byt);
                 i++;
                 if (i > 100000) {
                     i = 0;
@@ -225,8 +232,8 @@ public class ParallelStream extends InputStream {
                     System.out.println("100000 bytes took " + took + " milliseconds which means " + (100000000 / took) + " bytes per second");
                 }
             }
-            fos2.close();
-            ms2.close();
+            fos[0].close();
+            ms[0].close();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
