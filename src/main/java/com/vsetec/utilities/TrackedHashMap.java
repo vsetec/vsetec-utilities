@@ -37,24 +37,45 @@ public class TrackedHashMap<K, V> extends HashMap<K, V> {
         return get(key) != _original.get(key);
     }
 
-    public Map<K, V> getChanged() {
+    public Map<K, V> getDifference() {
+        return getDifference(_original);
+    }
+
+    public Map<K, V> getDifferenceAndCommit() {
+        return getDifferenceAndCommit(_original);
+    }
+
+    public Map<K, V> getDifference(Map<K, V> another) {
         HashMap<K, V> ret = new HashMap<>(3);
         for (Entry<K, V> entry : entrySet()) {
-            if (hasChanged(entry.getKey())) {
+            if (entry.getValue() != another.get(entry.getKey())) {
                 ret.put(entry.getKey(), entry.getValue());
             }
         }
+        // find removed
+//        for (Entry<K, V> entry : another.entrySet()) {
+//            if (!containsKey(entry.getKey())) {
+//                ret.put(entry.getKey(), null);
+//            }
+//        }
         return ret;
     }
 
-    public Map<K, V> getChangedAndCommit() {
+    public Map<K, V> getDifferenceAndCommit(Map<K, V> another) {
         HashMap<K, V> ret = new HashMap<>(3);
         for (Entry<K, V> entry : entrySet()) {
-            if (hasChanged(entry.getKey())) {
+            if (entry.getValue() != another.get(entry.getKey())) {
                 ret.put(entry.getKey(), entry.getValue());
-                _original.put(entry.getKey(), entry.getValue());
+                another.put(entry.getKey(), entry.getValue());
             }
         }
+        //remove truly deleted
+//        for (Entry<K, V> entry : another.entrySet()) {
+//            if (!containsKey(entry.getKey())) {
+//                ret.put(entry.getKey(), null);
+//                another.remove(entry.getKey());
+//            }
+//        }
         return ret;
     }
 
