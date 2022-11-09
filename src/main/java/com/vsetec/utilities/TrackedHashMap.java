@@ -47,6 +47,17 @@ public class TrackedHashMap<K, V> extends HashMap<K, V> {
         return ret;
     }
 
+    public Map<K, V> getChangedAndCommit() {
+        HashMap<K, V> ret = new HashMap<>(3);
+        for (Entry<K, V> entry : entrySet()) {
+            if (hasChanged(entry.getKey())) {
+                ret.put(entry.getKey(), entry.getValue());
+                _original.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return ret;
+    }
+
     public Map<K, V> getOriginal() {
         return _original;
     }
