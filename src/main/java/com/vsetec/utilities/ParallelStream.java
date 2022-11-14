@@ -34,10 +34,11 @@ import java.util.HashSet;
 public class ParallelStream extends InputStream {
 
     private static final HashMap<InputStream, Provider> _providers = new HashMap<>();
-    private static final int CHUNKSIZE = 50;
+    private static final int INITIALCHUNKSIZE = 50;
 
     private final Provider _provider;
     private boolean _isClosed = false;
+    private boolean _detachedTemporarily = false; // TODO: temp detach not tested
     private int _curPos = 0;
     private byte[] _buffer = new byte[0];
 
@@ -79,7 +80,7 @@ public class ParallelStream extends InputStream {
     public void close() throws IOException {
         if (!_isClosed) {
             _isClosed = true;
-            _provider._detachAndClose(this);
+            _provider._detach(this, false);
         }
     }
 
@@ -87,14 +88,27 @@ public class ParallelStream extends InputStream {
         return _provider._inputStream;
     }
 
+    public void detachTemporarily() {
+        try {
+            _provider._detach(this, true);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public void reattach() {
+        _provider._attach(this);
+    }
+
     private static class Provider {
 
-        private int _chunkSize = 50;
+        private int _chunkSize = INITIALCHUNKSIZE;
         private final InputStream _inputStream;
         private final HashSet<ParallelStream> _readers = new HashSet<>(4);
+        private int _temporarilyDetachedCount = 0;
         private byte[] _bufferTmp = new byte[_chunkSize];
         private Object _lock = new Object();
-        private byte[][] _bufferHolder = new byte[1][];
+        private byte[][] _bufferHolder = new byte[1][]; //poor man's mutable byte
         private int _howManyHaveAsked = 0;
 
         private Provider(InputStream inputStream) {
@@ -154,22 +168,40 @@ public class ParallelStream extends InputStream {
 
         }
 
-        private void _detachAndClose(ParallelStream par) throws IOException {
-            synchronized (_providers) {
-                synchronized (_lock) {
-                    _readers.remove(par);
-                    _lock.notifyAll();
-                    if (_readers.isEmpty()) {
+        private void _detach(ParallelStream par, boolean temporarily) throws IOException {
+            synchronized (_lock) {
+                _readers.remove(par);
+
+                if (temporarily) {
+                    if (!par._detachedTemporarily) {
+                        par._detachedTemporarily = true;
+                        _temporarilyDetachedCount++;
+                    }
+                } else {
+                    if (par._detachedTemporarily) {
+                        par._detachedTemporarily = false;
+                        _temporarilyDetachedCount--;
+                    }
+                }
+
+                if (!temporarily && _readers.isEmpty() && _temporarilyDetachedCount <= 0) {
+                    synchronized (_providers) {
                         _inputStream.close();
                         _providers.remove(_inputStream);
                     }
                 }
+
+                _lock.notifyAll();
             }
         }
 
         private void _attach(ParallelStream par) {
             synchronized (_lock) {
                 _readers.add(par);
+                if (par._detachedTemporarily) {
+                    _temporarilyDetachedCount--;
+                    par._detachedTemporarily = false;
+                }
                 _lock.notifyAll();
             }
         }
@@ -186,7 +218,7 @@ public class ParallelStream extends InputStream {
      * @throws FileNotFoundException
      */
     public static void main(String[] arguments) throws UnsupportedEncodingException, FileNotFoundException {
-        InputStream is = new BufferedInputStream(new FileInputStream("test.ts"));
+        InputStream is = new BufferedInputStream(new FileInputStream("DASH_720.mp4"));
         //InputStream is = new ByteArrayInputStream("A quick brown fox jumped over a lazy dog\n".getBytes("UTF-8"));
 
         int number = 4; // no less than 3 to test

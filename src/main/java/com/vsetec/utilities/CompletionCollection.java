@@ -15,6 +15,7 @@
  */
 package com.vsetec.utilities;
 
+import java.util.AbstractCollection;
 import java.util.Iterator;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionService;
@@ -30,18 +31,18 @@ import java.util.concurrent.TimeoutException;
  * https://stackoverflow.com/questions/9987019/how-to-know-when-a-completionservice-is-finished-delivering-results
  * @param <T>
  */
-public class CompletionIterator<T> implements Iterable<T> {
+public class CompletionCollection<T> extends AbstractCollection<T> {
 
     private int _count = 0;
     private final CompletionService<T> _completer;
     private final long _timeout;
 
-    public CompletionIterator(ExecutorService executor) {
+    public CompletionCollection(ExecutorService executor) {
         this._completer = new ExecutorCompletionService<>(executor);
         _timeout = Long.MAX_VALUE;
     }
 
-    public CompletionIterator(ExecutorService executor, long timeout) {
+    public CompletionCollection(ExecutorService executor, long timeout) {
         this._completer = new ExecutorCompletionService<>(executor);
         _timeout = timeout;
     }
@@ -49,6 +50,11 @@ public class CompletionIterator<T> implements Iterable<T> {
     public void submit(Callable<T> task) {
         _completer.submit(task);
         _count++;
+    }
+
+    @Override
+    public int size() {
+        return _count;
     }
 
     @Override
