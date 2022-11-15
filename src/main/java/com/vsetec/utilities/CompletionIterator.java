@@ -32,7 +32,7 @@ import java.util.concurrent.TimeoutException;
  */
 public class CompletionIterator<T> implements Iterator<T> {
 
-    private int _count = 0, _remaining = 0;
+    private int _count = 0;
     private final CompletionService<T> _completer;
     private final long _timeout;
 
@@ -49,12 +49,11 @@ public class CompletionIterator<T> implements Iterator<T> {
     public void submit(Callable<T> task) {
         _completer.submit(task);
         _count++;
-        _remaining++;
     }
 
     @Override
     public boolean hasNext() {
-        return _remaining > 0;
+        return _count > 0;
     }
 
     @Override
@@ -70,7 +69,7 @@ public class CompletionIterator<T> implements Iterator<T> {
                     return null;
                 }
             }
-            _remaining--;
+            _count--;
             return ret;
         } catch (InterruptedException | ExecutionException e) {
             throw new RuntimeException(e);
