@@ -24,6 +24,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 
@@ -39,8 +41,11 @@ public class ParallelStream extends InputStream {
     private final Provider _provider;
     private boolean _isClosed = false;
     private boolean _detachedTemporarily = false; // TODO: temp detach not tested
+    private final Deque<byte[]> _collectedWhenDetached = new ArrayDeque<>();
     private int _curPos = 0;
     private byte[] _buffer = new byte[0];
+//    private String _tabs = null;
+//    private int _lastLoaded = 0;
 
     public ParallelStream(InputStream parentStream) {
         synchronized (_providers) {
@@ -55,8 +60,8 @@ public class ParallelStream extends InputStream {
                     _providers.put(parentStream, _provider);
                 }
             }
-            _provider._attach(this);
         }
+        _provider._attach(this);
     }
 
     @Override
@@ -67,7 +72,26 @@ public class ParallelStream extends InputStream {
             return ret;
         }
 
-        _buffer = _provider._loadNext();
+        _buffer = _collectedWhenDetached.poll();
+        if (_buffer == null) {
+            if (_detachedTemporarily) {
+                throw new IllegalStateException("Reading from a detached ParallelStream");
+            }
+            //synchronized (_provider) {
+            _buffer = _provider._loadNext();
+//                if(_buffer!=null){
+//                    _lastLoaded++;
+//                    System.out.println(_tabs + "LO " + _provider._currentChunk+ "=" + _lastLoaded + (_lastLoaded != _provider._currentChunk?" *****":""));
+//                }else{
+//                    System.out.println(_tabs + "LO finish");
+//                }
+//                _lastLoaded = _provider._currentChunk;
+            //}
+        }
+//        else{
+//            _lastLoaded++;
+//            System.out.println(_tabs + "CU " + _lastLoaded + "(" + _collectedWhenDetached.size() +")");
+//        }
 
         if (_buffer == null) {
             return -1;
@@ -105,37 +129,43 @@ public class ParallelStream extends InputStream {
         private int _chunkSize = INITIALCHUNKSIZE;
         private final InputStream _inputStream;
         private final HashSet<ParallelStream> _readers = new HashSet<>(4);
-        private int _temporarilyDetachedCount = 0;
+        private final HashSet<ParallelStream> _temporarilyDetachedReaders = new HashSet<>(3);
         private byte[] _bufferTmp = new byte[_chunkSize];
-        private Object _lock = new Object();
-        private byte[][] _bufferHolder = new byte[1][]; //poor man's mutable byte
+        private byte[][] _bufferHolder = new byte[1][0]; //poor man's mutable byte
         private int _howManyHaveAsked = 0;
+//        private int _currentChunk = 0;
 
         private Provider(InputStream inputStream) {
             _inputStream = inputStream;
         }
 
-        private byte[] _loadNext() throws IOException {
+        private synchronized byte[] _loadNext() throws IOException {
 
-            final Object lock = _lock; // TODO: potential loophole when adding/removing readers while reading
-            synchronized (lock) {
+            //final Object lock = _lock; // TODO: potential loophole when adding/removing readers while reading
+            //synchronized (this)
+            {
+
+                if (_bufferHolder[0] == null) {
+                    return null;
+                }
 
                 _howManyHaveAsked++;
 
                 long waitTime = System.currentTimeMillis();
+                byte[] oldBuffer = _bufferHolder[0];
                 while (_howManyHaveAsked < _readers.size()) {
                     try {
-                        lock.wait(1000);
+                        this.wait(1000);
                     } catch (InterruptedException e) {
                         throw new RuntimeException(e);
                     }
-                    if (lock != _lock) { // switched to next
+                    if (oldBuffer != _bufferHolder[0]) { // switched to next
                         return _bufferHolder[0];
                     }
                 }
 
                 _howManyHaveAsked = 0;
-                _lock = new Object();
+                //_lock = new Object();
 
                 int size = _inputStream.read(_bufferTmp);
                 if (size == -1) {
@@ -143,9 +173,11 @@ public class ParallelStream extends InputStream {
                     _bufferHolder[0] = null;
 
                 } else {
+
                     _bufferHolder[0] = new byte[size];
                     System.arraycopy(_bufferTmp, 0, _bufferHolder[0], 0, size);
 
+//                    _currentChunk++;
                     // compute chunk size
                     waitTime = System.currentTimeMillis() - waitTime;
                     boolean resize = false;
@@ -161,7 +193,13 @@ public class ParallelStream extends InputStream {
                     }
                 }
 
-                lock.notifyAll();
+                if (_bufferHolder[0] != null) {
+                    for (ParallelStream par : _temporarilyDetachedReaders) {
+                        par._collectedWhenDetached.add(_bufferHolder[0]);
+                    }
+                }
+
+                this.notifyAll();
                 return _bufferHolder[0];
 
             }
@@ -169,40 +207,40 @@ public class ParallelStream extends InputStream {
         }
 
         private void _detach(ParallelStream par, boolean temporarily) throws IOException {
-            synchronized (_lock) {
+            synchronized (this) {
                 _readers.remove(par);
 
                 if (temporarily) {
                     if (!par._detachedTemporarily) {
                         par._detachedTemporarily = true;
-                        _temporarilyDetachedCount++;
+                        _temporarilyDetachedReaders.add(par);
                     }
                 } else {
                     if (par._detachedTemporarily) {
                         par._detachedTemporarily = false;
-                        _temporarilyDetachedCount--;
+                        _temporarilyDetachedReaders.remove(par);
                     }
                 }
 
-                if (!temporarily && _readers.isEmpty() && _temporarilyDetachedCount <= 0) {
+                if (!temporarily && _readers.isEmpty() && _temporarilyDetachedReaders.isEmpty()) {
                     synchronized (_providers) {
                         _inputStream.close();
                         _providers.remove(_inputStream);
                     }
                 }
 
-                _lock.notifyAll();
+                this.notifyAll();
             }
         }
 
         private void _attach(ParallelStream par) {
-            synchronized (_lock) {
+            synchronized (this) {
                 _readers.add(par);
                 if (par._detachedTemporarily) {
-                    _temporarilyDetachedCount--;
+                    _temporarilyDetachedReaders.remove(par);
                     par._detachedTemporarily = false;
                 }
-                _lock.notifyAll();
+                this.notifyAll();
             }
         }
 
@@ -218,31 +256,65 @@ public class ParallelStream extends InputStream {
      * @throws FileNotFoundException
      */
     public static void main(String[] arguments) throws UnsupportedEncodingException, FileNotFoundException {
-        InputStream is = new BufferedInputStream(new FileInputStream("DASH_720.mp4"));
+
+        String sourceFile = "test.ts";
+
+        final int[] waitcount = new int[1];
+        waitcount[0] = 0;
+
+        InputStream is = new BufferedInputStream(new FileInputStream(sourceFile));
         //InputStream is = new ByteArrayInputStream("A quick brown fox jumped over a lazy dog\n".getBytes("UTF-8"));
 
-        int number = 4; // no less than 3 to test
+        int number = 5; // no less than 3 to test
         OutputStream[] fos = new OutputStream[number];
-        InputStream[] ms = new ParallelStream[number];
+        ParallelStream[] ms = new ParallelStream[number];
         for (int i = 0; i < number; i++) {
-            fos[i] = new BufferedOutputStream(new FileOutputStream("testfile" + i, true));
-            ms[i] = new ParallelStream(is);
+            fos[i] = new BufferedOutputStream(new FileOutputStream("testfile" + i, false));
+            if (i != 2) {
+                ms[i] = new ParallelStream(is);
+                //char[]tabs = new char[i];
+                //for(int y=0;y<i;y++){
+                //    tabs[y] = '\t';
+                //}
+                //ms[i]._tabs = new String(tabs);
+            }
         }
 
-        for (int i = 2; i < number; i++) {
+        for (int i = 3; i < number; i++) {
+            waitcount[0]++;
             final int y = i;
             Thread thread = new Thread(new Runnable() {
-                final int ii = y;
+                //final int ii = y;
 
                 @Override
                 public void run() {
                     try {
                         int byt;
-                        while ((byt = ms[ii].read()) != -1) {
-                            fos[ii].write(byt);
+                        long beforeSleep = (long) (Math.random() * 90000) + 10000;
+                        while ((byt = ms[y].read()) != -1) {
+                            fos[y].write(byt);
+                            beforeSleep--;
+
+                            if (beforeSleep <= 0) {
+                                beforeSleep = (long) (Math.random() * 90000) + 10000;
+                                if ((beforeSleep & 1) == 0) {
+//                                    System.out.println("***** Sleeping with detach: " + y);
+                                    ms[y].detachTemporarily();
+                                    Thread.sleep(10);
+                                    ms[y].reattach();
+                                } else {
+//                                    System.out.println("***** Sleeping withOUT detach: " + y);
+                                    Thread.sleep(10);
+                                }
+                            }
+
                         }
-                        fos[ii].close();
-                        ms[ii].close();
+                        fos[y].close();
+                        ms[y].close();
+                        synchronized (waitcount) {
+                            waitcount[0]--;
+                            waitcount.notify();
+                        }
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
@@ -252,24 +324,74 @@ public class ParallelStream extends InputStream {
         }
 
         if (number >= 2) {
+            waitcount[0]++;
+
             Thread thread = new Thread(new Runnable() {
                 @Override
                 public void run() {
                     try {
 
+                        System.out.println("***** Sleeping before first byte: 1");
                         Thread.sleep(3000);
+                        int throwawayAfter = 100000;
 
                         int byt;
                         while ((byt = ms[1].read()) != -1) {
                             fos[1].write(byt);
+                            throwawayAfter--;
+                            if (throwawayAfter <= 0) {
+                                System.out.println("***** Detaching mid read: 1");
+                                break;
+                            }
                         }
                         fos[1].close();
                         ms[1].close();
+                        synchronized (waitcount) {
+                            waitcount[0]--;
+                            waitcount.notify();
+                        }
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
                 }
             }, "ParallelStream test 1 with delay");
+            thread.start();
+        }
+
+        if (number >= 3) {
+            waitcount[0]++;
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+
+                        int i = 2;
+
+                        Thread.sleep(3100);
+                        System.out.println("***** Attaching mid read: 2");
+
+                        ms[i] = new ParallelStream(is);
+                        char[] tabs = new char[i];
+                        for (int y = 0; y < i; y++) {
+                            tabs[y] = '\t';
+                        }
+                        //ms[i]._tabs = new String(tabs);
+
+                        int byt;
+                        while ((byt = ms[i].read()) != -1) {
+                            fos[i].write(byt);
+                        }
+                        fos[i].close();
+                        ms[i].close();
+                        synchronized (waitcount) {
+                            waitcount[0]--;
+                            waitcount.notify();
+                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            }, "ParallelStream test 2 with delayed attach");
             thread.start();
         }
 
@@ -295,6 +417,50 @@ public class ParallelStream extends InputStream {
             }
             fos[0].close();
             ms[0].close();
+
+            synchronized (waitcount) {
+                while (waitcount[0] > 0) {
+                    waitcount.wait(); // wait all to finish
+                }
+            }
+
+            // comparing
+            System.out.println("\n\n\nnow comparing");
+            for (i = 0; i < number; i++) {
+
+                String[] command = new String[]{"cmp", sourceFile, "testfile" + i};
+
+                System.out.println("compare testfile" + i);
+                Process process = Runtime.getRuntime().exec(command);
+
+                try {
+                    int b;
+                    while ((b = process.getErrorStream().read()) != -1) {
+                        System.err.write(b);
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+
+                Thread thread = new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            int b;
+                            while ((b = process.getInputStream().read()) != -1) {
+                                System.out.write(b);
+                            }
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                }, "outreader");
+                thread.start();
+
+                process.waitFor();
+
+            }
+
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
