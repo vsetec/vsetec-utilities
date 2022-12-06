@@ -48,6 +48,12 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
         _lastMap = _maps.get(_maps.size() - 1);
     }
 
+    public synchronized void replaceLast(Map<K, V> map) {
+        _maps.remove(_maps.size() - 1);
+        _maps.add(map);
+        _lastMap = _maps.get(_maps.size() - 1);
+    }
+
     public synchronized MergedMap shallowCopy() {
         MergedMap ret = new MergedMap<K, V>();
         for (Map map : _maps) {
