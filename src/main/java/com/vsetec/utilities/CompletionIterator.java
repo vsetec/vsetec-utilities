@@ -21,6 +21,7 @@ import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -46,9 +47,10 @@ public class CompletionIterator<T> implements Iterator<T> {
         _timeout = timeout;
     }
 
-    public void submit(Callable<T> task) {
-        _completer.submit(task);
+    public Future<T> submit(Callable<T> task) {
+        Future<T> ret = _completer.submit(task);
         _count++;
+        return ret;
     }
 
     @Override
