@@ -20,7 +20,6 @@ import java.util.AbstractCollection;
 import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -36,28 +35,29 @@ import java.util.Set;
  */
 public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
-    private final Set<K> _keySet = new HashSet<>();
-    private final List<HiddenMap> _maps = new ArrayList<>();
-    private HiddenMap _lastMap = null;
+    private final List<Map<K, V>> _maps = new ArrayList<>();
+    private Map<K, V> _lastMap = null;
 
     public synchronized void add(Map<K, V> map) {
-        HiddenMap hiddenMap = new HiddenMap(map);
-        _maps.add(hiddenMap);
-        _keySet.addAll(map.keySet());
-        _lastMap = hiddenMap;
+        _maps.add(map);
+        _lastMap = map;
     }
 
     public synchronized void add(int index, Map<K, V> map) {
-        HiddenMap hiddenMap = new HiddenMap(map);
-        _maps.add(index, hiddenMap);
-        _keySet.addAll(map.keySet());
+        _maps.add(index, map);
+        _lastMap = _maps.get(_maps.size() - 1);
+    }
+
+    public synchronized void replaceLast(Map<K, V> map) {
+        _maps.remove(_maps.size() - 1);
+        _maps.add(map);
         _lastMap = _maps.get(_maps.size() - 1);
     }
 
     public synchronized MergedMap shallowCopy() {
         MergedMap ret = new MergedMap<K, V>();
-        for (HiddenMap map : _maps) {
-            ret.add(map._hidden);
+        for (Map map : _maps) {
+            ret.add(map);
         }
         return ret;
     }
@@ -71,7 +71,7 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
     }
 
     public synchronized void detach(int index) {
-        _maps.set(index, new HiddenMap(new HashMap<>(_maps.get(index))));
+        _maps.set(index, new HashMap<>(_maps.get(index)));
     }
 
     public synchronized void detachLast() {
@@ -80,17 +80,17 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
     @Override
     public int size() {
-        return _keySet.size();
+        return keySet().size();
     }
 
     @Override
     public boolean isEmpty() {
-        return _keySet.isEmpty();
+        return keySet().isEmpty();
     }
 
     @Override
     public boolean containsKey(Object key) {
-        return _keySet.contains(key);
+        return keySet().contains(key);
     }
 
     @Override
@@ -106,8 +106,9 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
     @Override
     public V get(Object key) {
         V ret = null;
-        for (Map<K, V> map : _maps) {
-            ret = map.get(key);
+        for (int i = _maps.size(); i > 0;) {
+            i--;
+            ret = _maps.get(i).get(key);
             if (ret != null) {
                 break;
             }
@@ -118,30 +119,23 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
     @Override
     public synchronized V put(K key, V value) {
         Map<K, V> neededMap = _lastMap;
-        for (Map<K, V> map : _maps) {
-            if (map.containsKey(key)) {
-                neededMap = map;
+        for (int i = _maps.size(); i > 0;) {
+            i--;
+            Map<K, V> testMap = _maps.get(i);
+            if (testMap.containsKey(key)) {
+                neededMap = testMap;
                 break;
             }
         }
         V ret = neededMap.put(key, value);
-        _keySet.add(key);
         return ret;
     }
 
     @Override
     public synchronized V remove(Object key) {
-        Map<K, V> neededMap = _lastMap;
-        int containCount = 0;
+        V ret = null;
         for (Map<K, V> map : _maps) {
-            if (map.containsKey(key)) {
-                neededMap = map;
-                containCount++;
-            }
-        }
-        V ret = neededMap.remove(key);
-        if (containCount <= 1) {
-            _keySet.remove(key);
+            ret = map.remove(key);
         }
         return ret;
     }
@@ -155,7 +149,6 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
     @Override
     public synchronized void clear() {
-        _keySet.clear();
         for (Map<K, V> map : _maps) {
             map.clear();
         }
@@ -163,13 +156,17 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
     @Override
     public Set<K> keySet() {
-        return Collections.unmodifiableSet(_keySet);
+        Set<K> ret = new HashSet<>();
+        for (Map<K, V> map : _maps) {
+            ret.addAll(map.keySet());
+        }
+        return ret;
     }
 
     @Override
     public Collection<V> values() {
 
-        Iterator<K> keyIter = _keySet.iterator();
+        Iterator<K> keyIter = keySet().iterator();
 
         return new AbstractCollection<V>() {
             @Override
@@ -189,7 +186,7 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
             @Override
             public int size() {
-                return _keySet.size();
+                return keySet().size();
             }
         };
     }
@@ -197,7 +194,7 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
     @Override
     public Set<Entry<K, V>> entrySet() {
 
-        Iterator<K> keyIter = _keySet.iterator();
+        Iterator<K> keyIter = keySet().iterator();
 
         return new AbstractSet<Map.Entry<K, V>>() {
             @Override
@@ -235,204 +232,9 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
             @Override
             public int size() {
-                return _keySet.size();
+                return keySet().size();
             }
         };
-
-    }
-
-    private class HiddenMap implements Map<K, V>, Serializable {
-
-        private final Map<K, V> _hidden;
-
-        public HiddenMap(Map<K, V> _hidden) {
-            this._hidden = _hidden;
-        }
-
-        @Override
-        public int size() {
-            return _hidden.size();
-        }
-
-        @Override
-        public boolean isEmpty() {
-            return _hidden.isEmpty();
-        }
-
-        @Override
-        public boolean containsKey(Object key) {
-            return _hidden.containsKey(key);
-        }
-
-        @Override
-        public boolean containsValue(Object value) {
-            return _hidden.containsValue(value);
-        }
-
-        @Override
-        public V get(Object key) {
-            return _hidden.get(key);
-        }
-
-        @Override
-        public V put(K key, V value) {
-            synchronized (MergedMap.this) {
-                _keySet.add(key);
-                return _hidden.put(key, value);
-            }
-        }
-
-        @Override
-        public V remove(Object key) {
-            synchronized (MergedMap.this) {
-                V ret = _hidden.remove(key);
-                boolean keyDisappeared = true;
-                for (HiddenMap map : _maps) {
-                    if (map._hidden.containsKey(key)) {
-                        keyDisappeared = false;
-                        break;
-                    }
-                }
-                if (keyDisappeared) {
-                    _keySet.remove(key);
-                }
-                return ret;
-            }
-        }
-
-        @Override
-        public void putAll(Map<? extends K, ? extends V> m) {
-            synchronized (MergedMap.this) {
-                _hidden.putAll(m);
-                _keySet.addAll(m.keySet());
-            }
-        }
-
-        @Override
-        public void clear() {
-            synchronized (MergedMap.this) {
-                _hidden.clear();
-                _keySet.clear();
-                for (HiddenMap map : _maps) {
-                    _keySet.addAll(map._hidden.keySet());
-                }
-            }
-        }
-
-        @Override
-        public Set<K> keySet() {
-            return _hidden.keySet();
-        }
-
-        @Override
-        public Collection<V> values() {
-            return _hidden.values();
-        }
-
-        @Override
-        public Set<Entry<K, V>> entrySet() {
-            return new Set<Entry<K, V>>() {
-                @Override
-                public int size() {
-                    return _hidden.size();
-                }
-
-                @Override
-                public boolean isEmpty() {
-                    return _hidden.isEmpty();
-                }
-
-                @Override
-                public boolean contains(Object o) {
-                    return _hidden.entrySet().contains(o);
-                }
-
-                @Override
-                public Iterator<Entry<K, V>> iterator() {
-                    return _hidden.entrySet().iterator();
-                }
-
-                @Override
-                public Object[] toArray() {
-                    return _hidden.entrySet().toArray();
-                }
-
-                @Override
-                public <T> T[] toArray(T[] arg0) {
-                    return _hidden.entrySet().toArray(arg0);
-                }
-
-                @Override
-                public boolean add(Entry<K, V> e) {
-                    synchronized (MergedMap.this) {
-                        boolean ret = _hidden.entrySet().add(e);
-                        if (ret) {
-                            _keySet.add(e.getKey());
-                        }
-                        return ret;
-                    }
-                }
-
-                @Override
-                public boolean remove(Object o) {
-                    synchronized (MergedMap.this) {
-                        if (o instanceof Entry) {
-                            Entry e = (Entry) o;
-                            boolean ret = HiddenMap.this.containsKey(e.getKey());
-                            if (ret) {
-                                HiddenMap.this.remove(e.getKey());
-                            }
-                            return ret;
-                        } else {
-                            return false;
-                        }
-                    }
-                }
-
-                @Override
-                public boolean containsAll(Collection<?> c) {
-                    return _hidden.entrySet().containsAll(c);
-                }
-
-                @Override
-                public boolean addAll(Collection<? extends Entry<K, V>> c) {
-                    synchronized (MergedMap.this) {
-                        boolean ret = false;
-                        for (Entry<K, V> entry : c) {
-                            ret = HiddenMap.this.put(entry.getKey(), entry.getValue()) != null;
-                        }
-                        return ret;
-                    }
-                }
-
-                @Override
-                public boolean retainAll(Collection<?> c) {
-                    throw new UnsupportedOperationException("Not supported yet."); //TODO: is it really needed at any time?
-                }
-
-                @Override
-                public boolean removeAll(Collection<?> c) {
-                    synchronized (MergedMap.this) {
-                        boolean ret = false;
-                        for (Object obj : c) {
-                            if (obj instanceof Entry) {
-                                Entry<K, V> entry = (Entry<K, V>) obj;
-                                boolean thisTime = HiddenMap.this.remove(entry.getKey(), entry.getValue());
-                                if (thisTime) {
-                                    ret = true;
-                                }
-                            }
-                        }
-                        return ret;
-                    }
-                }
-
-                @Override
-                public void clear() {
-                    HiddenMap.this.clear();
-                }
-            };
-        }
 
     }
 

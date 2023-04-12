@@ -21,6 +21,7 @@ import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -30,7 +31,7 @@ import java.util.concurrent.TimeoutException;
  * https://stackoverflow.com/questions/9987019/how-to-know-when-a-completionservice-is-finished-delivering-results
  * @param <T>
  */
-public class CompletionIterator<T> implements Iterable<T> {
+public class CompletionIterator<T> implements Iterator<T> {
 
     private int _count = 0;
     private final CompletionService<T> _completer;
@@ -46,63 +47,35 @@ public class CompletionIterator<T> implements Iterable<T> {
         _timeout = timeout;
     }
 
-    public void submit(Callable<T> task) {
-        _completer.submit(task);
+    public Future<T> submit(Callable<T> task) {
+        Future<T> ret = _completer.submit(task);
         _count++;
+        return ret;
     }
 
     @Override
-    public Iterator<T> iterator() {
+    public boolean hasNext() {
+        return _count > 0;
+    }
 
-        if (_timeout == Long.MAX_VALUE) {
-
-            return new Iterator<T>() {
-
-                @Override
-                public boolean hasNext() {
-                    return _count > 0;
+    @Override
+    public T next() {
+        final T ret;
+        try {
+            if (_timeout == Long.MAX_VALUE) {
+                ret = _completer.take().get();
+            } else {
+                try {
+                    ret = _completer.take().get(_timeout, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException te) {
+                    return null;
                 }
-
-                @Override
-                public T next() {
-                    try {
-                        T ret = _completer.take().get();
-                        _count--;
-                        return ret;
-                    } catch (InterruptedException | ExecutionException e) {
-                        throw new RuntimeException(e);
-                    }
-                }
-
-            };
-
-        } else {
-
-            return new Iterator<T>() {
-
-                @Override
-                public boolean hasNext() {
-                    return _count > 0;
-                }
-
-                @Override
-                public T next() {
-                    try {
-                        T ret = _completer.take().get(_timeout, TimeUnit.MILLISECONDS);
-                        _count--;
-                        return ret;
-                    } catch (InterruptedException | ExecutionException e) {
-                        throw new RuntimeException(e);
-                    } catch (TimeoutException e) {
-                        _count--;
-                        return null;
-                    }
-                }
-
-            };
-
+            }
+            _count--;
+            return ret;
+        } catch (InterruptedException | ExecutionException e) {
+            throw new RuntimeException(e);
         }
-
     }
 
 }

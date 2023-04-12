@@ -24,6 +24,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
 
 /**
  *
@@ -31,144 +35,190 @@ import java.io.UnsupportedEncodingException;
  */
 public class ParallelStream extends InputStream {
 
-    //TODO: probably rewrite with a dedicated provider thread
+    private static final HashMap<InputStream, Provider> _providers = new HashMap<>();
+    private static final int INITIALCHUNKSIZE = 50;
+
     private final Provider _provider;
-    private int _myNumber;
-    private boolean _askedForNext = false;
     private boolean _isClosed = false;
-    private final byte[] _buffer = new byte[50];
-    private int _bufferEnd = -1;
+    private boolean _detachedTemporarily = false; // TODO: temp detach not tested
+    private final Deque<byte[]> _collectedWhenDetached = new ArrayDeque<>();
     private int _curPos = 0;
+    private byte[] _buffer = new byte[0];
 
     public ParallelStream(InputStream parentStream) {
-        if (parentStream instanceof ParallelStream) {
-            _provider = ((ParallelStream) parentStream)._provider;
-            synchronized (_provider) {
-                _provider._attachAndGetYourNumber(this);
+        synchronized (_providers) {
+            if (parentStream instanceof ParallelStream) {
+                _provider = ((ParallelStream) parentStream)._provider;
+            } else {
+                Provider provider = _providers.get(parentStream);
+                if (provider != null) {
+                    _provider = provider;
+                } else {
+                    _provider = new Provider(parentStream);
+                    _providers.put(parentStream, _provider);
+                }
             }
-        } else {
-            _provider = new Provider(parentStream);
-            _provider._attachAndGetYourNumber(this);
         }
+        _provider._attach(this);
     }
 
     @Override
     public int read() throws IOException {
-        if (_curPos < _bufferEnd) {
+        if (_curPos < _buffer.length) {
             int ret = Byte.toUnsignedInt(_buffer[_curPos]);
             _curPos++;
             return ret;
         }
 
-        synchronized (this) {
-            _askedForNext = true;
-            if (_myNumber == 0) {
-                _provider._loadNext();
-            } else {
-                notify();
+        _buffer = _collectedWhenDetached.poll();
+        if (_buffer == null) {
+            if (_detachedTemporarily) {
+                throw new IllegalStateException("Reading from a detached ParallelStream");
             }
-            while (_askedForNext) {
-                try {
-                    wait(1000);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException("Unexpected interruption", e);
-                }
-            }
-            if (_bufferEnd < 0) {
-                return -1;
-            } else {
-                int ret = Byte.toUnsignedInt(_buffer[0]);
-                _curPos = 1;
-                return ret;
-            }
+            _buffer = _provider._loadNext();
         }
+
+        if (_buffer == null) {
+            return -1;
+        }
+        _curPos = 1;
+        return Byte.toUnsignedInt(_buffer[0]);
     }
 
     @Override
     public void close() throws IOException {
         if (!_isClosed) {
-            _provider._detachAndClose(this);
             _isClosed = true;
+            _provider._detach(this, false);
         }
-    }
-
-    public int getSequenceNumber() {
-        return _myNumber;
     }
 
     public InputStream getSource() {
         return _provider._inputStream;
     }
 
-    private class Provider {
+    public void detachTemporarily() {
+        try {
+            _provider._detach(this, true);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
+    public void reattach() {
+        _provider._attach(this);
+    }
+
+    private static class Provider {
+
+        private int _chunkSize = INITIALCHUNKSIZE;
         private final InputStream _inputStream;
-        private ParallelStream[] _readers = new ParallelStream[0];
-        private final byte[] _bufferP = new byte[50];
-        private int _bufferEndP = -1;
+        private final HashSet<ParallelStream> _readers = new HashSet<>(4);
+        private final HashSet<ParallelStream> _temporarilyDetachedReaders = new HashSet<>(3);
+        private byte[] _bufferTmp = new byte[_chunkSize];
+        private byte[][] _bufferHolder = new byte[1][0]; //poor man's mutable byte
+        private int _howManyHaveAsked = 0;
 
         private Provider(InputStream inputStream) {
             _inputStream = inputStream;
         }
 
-        private synchronized void _loadNext() throws IOException {
-            _bufferEndP = _inputStream.read(_bufferP);
+        private synchronized byte[] _loadNext() throws IOException {
 
-            for (ParallelStream sibling : _readers) {
-                synchronized (sibling) {
-                    while (!sibling._askedForNext) {
-                        try {
-                            sibling.wait(1000);
-                        } catch (InterruptedException e) {
-                            throw new RuntimeException("Unexpected interruption", e);
-                        }
-                    }
-                    sibling._askedForNext = false;
-                    sibling._bufferEnd = _bufferEndP;
-                    if (_bufferEndP >= 0) {
-                        System.arraycopy(_bufferP, 0, sibling._buffer, 0, _bufferEndP);
-                    }
-                    sibling.notify();
+            if (_bufferHolder[0] == null) {
+                return null;
+            }
+
+            _howManyHaveAsked++;
+
+            long waitTime = System.currentTimeMillis();
+            byte[] oldBuffer = _bufferHolder[0];
+            while (_howManyHaveAsked < _readers.size()) {
+                try {
+                    this.wait(1000);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                if (oldBuffer != _bufferHolder[0]) { // switched to next
+                    return _bufferHolder[0];
                 }
             }
-            // all asked
+
+            _howManyHaveAsked = 0;
+            //_lock = new Object();
+
+            int size = _inputStream.read(_bufferTmp);
+            if (size == -1) {
+
+                _bufferHolder[0] = null;
+
+            } else {
+
+                _bufferHolder[0] = new byte[size];
+                System.arraycopy(_bufferTmp, 0, _bufferHolder[0], 0, size);
+
+                // compute chunk size
+                waitTime = System.currentTimeMillis() - waitTime;
+                boolean resize = false;
+                if (waitTime > 100 && _chunkSize > 50) {
+                    _chunkSize = (int) (_chunkSize * 0.7);
+                    resize = true;
+                } else if (size == _chunkSize) {
+                    _chunkSize = (int) (_chunkSize * 1.5);
+                    resize = true;
+                }
+                if (resize) {
+                    _bufferTmp = new byte[_chunkSize];
+                }
+            }
+
+            if (_bufferHolder[0] != null) {
+                for (ParallelStream par : _temporarilyDetachedReaders) {
+                    par._collectedWhenDetached.add(_bufferHolder[0]);
+                }
+            }
+
+            this.notifyAll();
+            return _bufferHolder[0];
+
         }
 
-        private synchronized void _detachAndClose(ParallelStream whosClosing) throws IOException {
-            // TODO: check if it's safe to detach one of the readers while others are working. What if another reader becomes first thus acquiring a special position
-            synchronized (whosClosing) {
-                synchronized (_readers[0]) {
-                    int ret = _readers.length;
-                    int nextGood = whosClosing._myNumber + 1;
+        private void _detach(ParallelStream par, boolean temporarily) throws IOException {
+            synchronized (this) {
+                _readers.remove(par);
 
-                    ParallelStream[] newReaderList = new ParallelStream[ret - 1];
-                    System.arraycopy(_readers, 0, newReaderList, 0, whosClosing._myNumber);
-                    if (nextGood < _readers.length) {
-                        System.arraycopy(_readers, nextGood, newReaderList, whosClosing._myNumber, newReaderList.length - whosClosing._myNumber);
+                if (temporarily) {
+                    if (!par._detachedTemporarily) {
+                        par._detachedTemporarily = true;
+                        _temporarilyDetachedReaders.add(par);
                     }
-                    _readers = newReaderList;
+                } else {
+                    if (par._detachedTemporarily) {
+                        par._detachedTemporarily = false;
+                        _temporarilyDetachedReaders.remove(par);
+                    }
+                }
 
-                    if (newReaderList.length == 0) {
+                if (!temporarily && _readers.isEmpty() && _temporarilyDetachedReaders.isEmpty()) {
+                    synchronized (_providers) {
                         _inputStream.close();
-                    } else {
-                        for (int i = 0; i < newReaderList.length; i++) {
-                            newReaderList[i]._myNumber = i;
-                        }
+                        _providers.remove(_inputStream);
                     }
-                    notifyAll();
                 }
+
+                this.notifyAll();
             }
         }
 
-        private synchronized void _attachAndGetYourNumber(ParallelStream ms) {
-            int ret = _readers.length;
-
-            ParallelStream[] newReaderList = new ParallelStream[ret + 1];
-            System.arraycopy(_readers, 0, newReaderList, 0, ret);
-            newReaderList[ret] = ms;
-            _readers = newReaderList;
-
-            ms._myNumber = ret;
+        private void _attach(ParallelStream par) {
+            synchronized (this) {
+                _readers.add(par);
+                if (par._detachedTemporarily) {
+                    _temporarilyDetachedReaders.remove(par);
+                    par._detachedTemporarily = false;
+                }
+                this.notifyAll();
+            }
         }
 
     }
@@ -176,78 +226,207 @@ public class ParallelStream extends InputStream {
     /**
      * A quick test. Creates several identical files.
      *
-     * plain copy - 20.000.000 bytes per second
-     *
-     * 2,3 files - 2 - 5.000.000 bytes per second
-     *
-     * 1 file - 25.000.000 bytes per second
+     * 4 files - 15-20 Megabytes per second
      *
      * @param arguments
      * @throws UnsupportedEncodingException
      * @throws FileNotFoundException
      */
     public static void main(String[] arguments) throws UnsupportedEncodingException, FileNotFoundException {
-        InputStream is = new BufferedInputStream(new FileInputStream("/home/fedd/Videos/stgal.mp4"));
+
+        String sourceFile = "DASH_720.mp4";
+
+        final int[] waitcount = new int[1];
+        waitcount[0] = 0;
+
+        InputStream is = new BufferedInputStream(new FileInputStream(sourceFile));
         //InputStream is = new ByteArrayInputStream("A quick brown fox jumped over a lazy dog\n".getBytes("UTF-8"));
 
-        OutputStream fos1 = new BufferedOutputStream(new FileOutputStream("testfile1.mp4", true));
-        OutputStream fos2 = new BufferedOutputStream(new FileOutputStream("testfile2.mp4", true));
-        OutputStream fos3 = new BufferedOutputStream(new FileOutputStream("testfile3.mp4", true));
-
-        InputStream ms1 = new ParallelStream(is);
-        InputStream ms2 = new ParallelStream(ms1);
-        InputStream ms3 = new ParallelStream(ms2);
-
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    int byt;
-                    while ((byt = ms1.read()) != -1) {
-                        fos1.write(byt);
-                    }
-                    fos1.close();
-                    ms1.close();
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
+        int number = 5; // no less than 3 to test
+        OutputStream[] fos = new OutputStream[number];
+        ParallelStream[] ms = new ParallelStream[number];
+        for (int i = 0; i < number; i++) {
+            fos[i] = new BufferedOutputStream(new FileOutputStream("testfile" + i, false));
+            if (i != 2) {
+                ms[i] = new ParallelStream(is);
             }
-        }, "ParallelStream test");
-        thread.start();
+        }
 
-        thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    int byt;
-                    while ((byt = ms3.read()) != -1) {
-                        fos3.write(byt);
+        for (int i = 3; i < number; i++) {
+            waitcount[0]++;
+            final int y = i;
+            Thread thread = new Thread(new Runnable() {
+
+                @Override
+                public void run() {
+                    try {
+                        int byt;
+                        long beforeSleep = (long) (Math.random() * 90000) + 10000;
+                        while ((byt = ms[y].read()) != -1) {
+                            fos[y].write(byt);
+                            beforeSleep--;
+
+                            if (beforeSleep <= 0) {
+                                beforeSleep = (long) (Math.random() * 90000) + 10000;
+                                if ((beforeSleep & 1) == 0) {
+//                                    System.out.println("***** Sleeping with detach: " + y);
+                                    ms[y].detachTemporarily();
+                                    Thread.sleep(10);
+                                    ms[y].reattach();
+                                } else {
+//                                    System.out.println("***** Sleeping withOUT detach: " + y);
+                                    Thread.sleep(10);
+                                }
+                            }
+
+                        }
+                        fos[y].close();
+                        ms[y].close();
+                        synchronized (waitcount) {
+                            waitcount[0]--;
+                            waitcount.notify();
+                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
                     }
-                    fos3.close();
-                    ms3.close();
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
                 }
-            }
-        }, "ParallelStream test 3");
-        thread.start();
+            }, "ParallelStream test " + i);
+            thread.start();
+        }
+
+        if (number >= 2) {
+            waitcount[0]++;
+
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+
+                        System.out.println("***** Sleeping before first byte: 1");
+                        Thread.sleep(3000);
+                        int throwawayAfter = 100000;
+
+                        int byt;
+                        while ((byt = ms[1].read()) != -1) {
+                            fos[1].write(byt);
+                            throwawayAfter--;
+                            if (throwawayAfter <= 0) {
+                                System.out.println("***** Detaching mid read: 1");
+                                break;
+                            }
+                        }
+                        fos[1].close();
+                        ms[1].close();
+                        synchronized (waitcount) {
+                            waitcount[0]--;
+                            waitcount.notify();
+                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            }, "ParallelStream test 1 with delay");
+            thread.start();
+        }
+
+        if (number >= 3) {
+            waitcount[0]++;
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+
+                        int i = 2;
+
+                        Thread.sleep(3100);
+                        System.out.println("***** Attaching mid read: 2");
+
+                        ms[i] = new ParallelStream(is);
+
+                        int byt;
+                        while ((byt = ms[i].read()) != -1) {
+                            fos[i].write(byt);
+                        }
+                        fos[i].close();
+                        ms[i].close();
+                        synchronized (waitcount) {
+                            waitcount[0]--;
+                            waitcount.notify();
+                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            }, "ParallelStream test 2 with delayed attach");
+            thread.start();
+        }
 
         try {
             int byt;
             int i = 0;
+            int j = 0;
+            long tot = 0;
             long time = System.currentTimeMillis();
-            while ((byt = ms2.read()) != -1) {
-                fos2.write(byt);
+            while ((byt = ms[0].read()) != -1) {
+                fos[0].write(byt);
                 i++;
-                if (i > 100000) {
+                if (i > 1048576) {
                     i = 0;
                     long took = System.currentTimeMillis() - time;
                     time = System.currentTimeMillis();
-                    System.out.println("100000 bytes took " + took + " milliseconds which means " + (100000000 / took) + " bytes per second");
+                    long kb = 1048576000 / took / 1024;
+                    tot = tot + kb;
+                    j++;
+
+                    System.out.println("1MB took " + took + " ms which means " + kb + " KB/s. Avg - " + (tot / j) + "KB/s");
                 }
             }
-            fos2.close();
-            ms2.close();
+            fos[0].close();
+            ms[0].close();
+
+            synchronized (waitcount) {
+                while (waitcount[0] > 0) {
+                    waitcount.wait(); // wait all to finish
+                }
+            }
+
+            // comparing
+            System.out.println("\n\n\nnow comparing");
+            for (i = 0; i < number; i++) {
+
+                String[] command = new String[]{"cmp", sourceFile, "testfile" + i};
+
+                System.out.println("compare testfile" + i);
+                Process process = Runtime.getRuntime().exec(command);
+
+                try {
+                    int b;
+                    while ((b = process.getErrorStream().read()) != -1) {
+                        System.err.write(b);
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+
+                Thread thread = new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            int b;
+                            while ((b = process.getInputStream().read()) != -1) {
+                                System.out.write(b);
+                            }
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                }, "outreader");
+                thread.start();
+
+                process.waitFor();
+
+            }
+
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
