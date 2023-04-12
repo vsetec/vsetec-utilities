@@ -106,8 +106,9 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
     @Override
     public V get(Object key) {
         V ret = null;
-        for (Map<K, V> map : _maps) {
-            ret = map.get(key);
+        for (int i = _maps.size(); i > 0;) {
+            i--;
+            ret = _maps.get(i).get(key);
             if (ret != null) {
                 break;
             }
@@ -118,9 +119,11 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
     @Override
     public synchronized V put(K key, V value) {
         Map<K, V> neededMap = _lastMap;
-        for (Map<K, V> map : _maps) {
-            if (map.containsKey(key)) {
-                neededMap = map;
+        for (int i = _maps.size(); i > 0;) {
+            i--;
+            Map<K, V> testMap = _maps.get(i);
+            if (testMap.containsKey(key)) {
+                neededMap = testMap;
                 break;
             }
         }
@@ -130,15 +133,10 @@ public class MergedMap<K, V> implements Map<K, V>, Serializable {
 
     @Override
     public synchronized V remove(Object key) {
-        Map<K, V> neededMap = _lastMap;
-        int containCount = 0;
+        V ret = null;
         for (Map<K, V> map : _maps) {
-            if (map.containsKey(key)) {
-                neededMap = map;
-                containCount++;
-            }
+            ret = map.remove(key);
         }
-        V ret = neededMap.remove(key);
         return ret;
     }
 
